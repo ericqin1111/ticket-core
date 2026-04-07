@@ -12,11 +12,13 @@ import com.ticket.core.order.entity.TicketOrder;
 import com.ticket.core.order.mapper.TicketOrderMapper;
 import com.ticket.core.reservation.entity.ReservationRecord;
 import com.ticket.core.reservation.mapper.ReservationRecordMapper;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDateTime;
 
@@ -35,6 +37,11 @@ class OrderServiceTest {
 
     @InjectMocks
     private OrderService orderService;
+
+    @BeforeEach
+    void setUp() {
+        ReflectionTestUtils.setField(orderService, "paymentDeadlineMinutes", 30);
+    }
 
     private static final String ACTION_NAME = "CREATE_ORDER";
     private static final String IDEMPOTENCY_KEY = "order-idem-key-001";

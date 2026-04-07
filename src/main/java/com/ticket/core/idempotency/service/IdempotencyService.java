@@ -11,6 +11,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -50,6 +53,7 @@ public class IdempotencyService {
      *   <li>If exists with a different hash: throws IDEMPOTENCY_CONFLICT.</li>
      * </ul>
      */
+    @Transactional(propagation = Propagation.REQUIRES_NEW, isolation = Isolation.READ_COMMITTED)
     public IdempotencyRecord checkAndMarkProcessing(String actionName, String idempotencyKey,
                                                     String requestHash, String externalTradeNo) {
         LambdaQueryWrapper<IdempotencyRecord> query = new LambdaQueryWrapper<IdempotencyRecord>()
@@ -77,9 +81,14 @@ public class IdempotencyService {
             mapper.insert(record);
             return record; // newly created PROCESSING record — caller must execute business logic
         } catch (DuplicateKeyException e) {
-            // Concurrent insert won; re-read and validate
+            // Concurrent insert won; re-read under READ_COMMITTED so the committed row is visible
             existing = mapper.selectOne(query);
-            if (existing != null && !existing.getRequestHash().equals(requestHash)) {
+            if (existing == null) {
+                // Extreme race edge: re-read still missed the row; let client retry
+                throw new BusinessException(ErrorCode.IDEMPOTENCY_CONFLICT,
+                        "Concurrent idempotency conflict, please retry.");
+            }
+            if (!existing.getRequestHash().equals(requestHash)) {
                 throw new BusinessException(ErrorCode.IDEMPOTENCY_CONFLICT);
             }
             return existing;
@@ -88,7 +97,9 @@ public class IdempotencyService {
 
     /**
      * Marks the idempotency record as SUCCEEDED and caches the serialized response for future replay.
+     * Must be called within an active transaction so the update is rolled back if the outer operation fails.
      */
+    @Transactional(propagation = Propagation.MANDATORY)
     public void markSucceeded(String idempotencyRecordId, String resourceType,
                               String resourceId, Object responseBody) {
         try {

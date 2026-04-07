@@ -17,3 +17,12 @@ mybatis-plus:
 
 server:
   port: 8080
+
+spring:
+  jackson:
+    serialization:
+      order-map-entries-by-keys: true
+
+ticket:
+  order:
+    payment-deadline-minutes: 30

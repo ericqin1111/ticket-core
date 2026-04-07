@@ -14,6 +14,7 @@ import com.ticket.core.reservation.entity.ReservationRecord;
 import com.ticket.core.reservation.mapper.ReservationRecordMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -35,8 +36,10 @@ import java.util.UUID;
 public class OrderService {
 
     private static final String ACTION_NAME = "CREATE_ORDER";
-    /** Default payment window; scheduler (out of RFC-01 scope) will enforce the deadline. */
-    private static final int PAYMENT_DEADLINE_MINUTES = 30;
+
+    /** Payment window injected from config; scheduler (out of RFC-01 scope) will enforce the deadline. */
+    @Value("${ticket.order.payment-deadline-minutes:30}")
+    private int paymentDeadlineMinutes;
 
     private final TicketOrderMapper ticketOrderMapper;
     private final ReservationRecordMapper reservationRecordMapper;
@@ -71,11 +74,15 @@ public class OrderService {
         // Generate order ID before consuming reservation so both IDs are recorded atomically
         String orderId = UUID.randomUUID().toString();
 
+        // Capture a single timestamp for the entire operation so consumedAt and paymentDeadlineAt
+        // are consistent even if processing crosses a second boundary.
+        LocalDateTime now = LocalDateTime.now();
+
         // Consume reservation — MyBatis-Plus @Version adds AND version=? to the UPDATE.
         // If another thread consumed concurrently, affected rows = 0 (Failure Scenario 3 guard).
         reservation.setStatus("CONSUMED");
         reservation.setConsumedOrderId(orderId);
-        reservation.setConsumedAt(LocalDateTime.now());
+        reservation.setConsumedAt(now);
         int consumed = reservationRecordMapper.updateById(reservation);
         if (consumed == 0) {
             log.warn("Concurrent reservation consume conflict: reservationId={}", request.getReservationId());
@@ -84,7 +91,6 @@ public class OrderService {
         log.info("Reservation consumed: reservationId={}, orderId={}", request.getReservationId(), orderId);
 
         // Create order — initial state is always PENDING_PAYMENT
-        LocalDateTime now = LocalDateTime.now();
         TicketOrder order = new TicketOrder();
         order.setOrderId(orderId);
         order.setExternalTradeNo(request.getExternalTradeNo());
@@ -93,7 +99,7 @@ public class OrderService {
         order.setBuyerRef(request.getBuyer().getBuyerRef());
         order.setContactPhone(request.getBuyer().getContactPhone());
         order.setContactEmail(request.getBuyer().getContactEmail());
-        order.setPaymentDeadlineAt(now.plusMinutes(PAYMENT_DEADLINE_MINUTES));
+        order.setPaymentDeadlineAt(now.plusMinutes(paymentDeadlineMinutes));
         if (request.getSubmissionContext() != null) {
             order.setSubmissionContextJson(toJson(request.getSubmissionContext()));
         }
