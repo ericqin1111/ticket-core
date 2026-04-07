@@ -16,4 +16,8 @@ public class FulfillmentService {
         return fulfillmentRecordMapper.selectOne(new LambdaQueryWrapper<FulfillmentRecord>()
                 .eq(FulfillmentRecord::getOrderId, orderId));
     }
+
+    public void create(FulfillmentRecord fulfillmentRecord) {
+        fulfillmentRecordMapper.insert(fulfillmentRecord);
+    }
 }
