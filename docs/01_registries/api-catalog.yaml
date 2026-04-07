@@ -1,0 +1,105 @@
+# API Catalog — Global Registry
+# Maintained by: governance-agent
+# Last updated by: RFC-TKT001-01
+# Format: each endpoint is one entry under its owning module.
+
+catalog:
+  - id: "GET /catalog-items/{catalogItemId}/sellable-availability"
+    method: GET
+    path: "/catalog-items/{catalogItemId}/sellable-availability"
+    introduced_by: "RFC-TKT001-01"
+    description: "查询商品当前可售快照，供锁票前同步校验。"
+    path_params:
+      - name: catalogItemId
+        type: string
+        required: true
+    response_200:
+      schema: "sellable-availability-response"
+      fields:
+        catalog_item_id: { type: string }
+        inventory_resource_id: { type: string }
+        sellable_quantity: { type: integer, minimum: 0 }
+        reserved_quantity: { type: integer, minimum: 0 }
+        status: { type: string, enum: [SELLABLE, LOW_STOCK, SOLD_OUT, OFF_SHELF] }
+        checked_at: { type: string, format: date-time }
+    error_codes:
+      - CATALOG_ITEM_NOT_SELLABLE  # 422 — item not found or status != ACTIVE
+
+reservation:
+  - id: "POST /reservations"
+    method: POST
+    path: "/reservations"
+    introduced_by: "RFC-TKT001-01"
+    description: "创建 Reservation.ACTIVE，并占用库存资源。"
+    required_headers:
+      - name: "Idempotency-Key"
+        type: string
+        description: "动作级幂等键，不与 POST /orders 共享同一幂等空间"
+    request_body:
+      schema: "create-reservation-request"
+      required: [external_trade_no, catalog_item_id, quantity, reservation_ttl_seconds]
+      fields:
+        external_trade_no: { type: string, minLength: 1 }
+        catalog_item_id: { type: string, minLength: 1 }
+        quantity: { type: integer, minimum: 1 }
+        reservation_ttl_seconds: { type: integer, minimum: 30 }
+        channel_context: { type: object, additionalProperties: { type: string }, optional: true }
+    response_201:
+      schema: "create-reservation-response"
+      fields:
+        reservation_id: { type: string }
+        external_trade_no: { type: string }
+        catalog_item_id: { type: string }
+        quantity: { type: integer, minimum: 1 }
+        status: { type: string, enum: [ACTIVE, CONSUMED, EXPIRED] }
+        expires_at: { type: string, format: date-time }
+    error_codes:
+      - CATALOG_ITEM_NOT_SELLABLE   # 422 — catalog item inactive
+      - INSUFFICIENT_INVENTORY      # 409 — sellable quantity insufficient or concurrent conflict
+      - IDEMPOTENCY_CONFLICT        # 409 — same key, different request payload
+
+order:
+  - id: "POST /orders"
+    method: POST
+    path: "/orders"
+    introduced_by: "RFC-TKT001-01"
+    description: "原子 consume Reservation 并创建 Order.PENDING_PAYMENT。"
+    required_headers:
+      - name: "Idempotency-Key"
+        type: string
+        description: "动作级幂等键，不与 POST /reservations 共享同一幂等空间"
+    request_body:
+      schema: "create-order-request"
+      required: [external_trade_no, reservation_id, buyer]
+      fields:
+        external_trade_no: { type: string, minLength: 1 }
+        reservation_id: { type: string, minLength: 1 }
+        buyer:
+          type: object
+          required: [buyer_ref]
+          fields:
+            buyer_ref: { type: string, minLength: 1 }
+            contact_phone: { type: string, optional: true }
+            contact_email: { type: string, optional: true }
+        submission_context: { type: object, additionalProperties: { type: string }, optional: true }
+    response_201:
+      schema: "create-order-response"
+      fields:
+        order_id: { type: string }
+        external_trade_no: { type: string }
+        reservation_id: { type: string }
+        status: { type: string, enum: [PENDING_PAYMENT] }
+        payment_deadline_at: { type: string, format: date-time }
+    error_codes:
+      - RESERVATION_NOT_FOUND          # 404 — reservation_id does not exist
+      - RESERVATION_ALREADY_CONSUMED   # 409 — reservation status is CONSUMED
+      - RESERVATION_EXPIRED            # 410 — reservation status is EXPIRED or expires_at passed
+      - IDEMPOTENCY_CONFLICT           # 409 — same key, different request payload
+
+shared_error_schema:
+  schema: "error-response"
+  fields:
+    code: { type: string, enum: [CATALOG_ITEM_NOT_SELLABLE, INSUFFICIENT_INVENTORY, RESERVATION_NOT_FOUND, RESERVATION_ALREADY_CONSUMED, RESERVATION_EXPIRED, IDEMPOTENCY_CONFLICT] }
+    message: { type: string }
+    request_id: { type: string }
+    retryable: { type: boolean }
