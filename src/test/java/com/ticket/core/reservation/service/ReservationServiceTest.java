@@ -11,11 +11,10 @@ import com.ticket.core.inventory.entity.InventoryResource;
 import com.ticket.core.inventory.service.InventoryService;
 import com.ticket.core.reservation.dto.CreateReservationRequest;
 import com.ticket.core.reservation.dto.CreateReservationResponse;
+import com.ticket.core.reservation.entity.ReservationRecord;
 import com.ticket.core.reservation.mapper.ReservationRecordMapper;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -37,6 +36,7 @@ class ReservationServiceTest {
     @InjectMocks
     private ReservationService reservationService;
 
+    private static final String ACTION_NAME = "CREATE_RESERVATION";
     private static final String IDEMPOTENCY_KEY = "test-idem-key-001";
     private static final String CATALOG_ITEM_ID = "item-001";
     private static final String INVENTORY_RESOURCE_ID = "inv-001";
@@ -84,9 +84,9 @@ class ReservationServiceTest {
                 .thenReturn(processingRecord());
         when(catalogService.validateAndGetActiveItem(CATALOG_ITEM_ID)).thenReturn(activeCatalogItem());
         when(inventoryService.getActiveInventory(INVENTORY_RESOURCE_ID)).thenReturn(activeInventory());
-        doNothing().when(inventoryService).lockQuantity(any(), eq(2));
-        when(reservationRecordMapper.insert(any())).thenReturn(1);
-        doNothing().when(idempotencyService).markSucceeded(anyString(), eq("RESERVATION"), anyString(), any());
+        doNothing().when(inventoryService).lockQuantity(any(InventoryResource.class), eq(2));
+        when(reservationRecordMapper.insert(any(ReservationRecord.class))).thenReturn(1);
+        doNothing().when(idempotencyService).markSucceeded(anyString(), eq("RESERVATION"), anyString(), any(CreateReservationResponse.class));
 
         CreateReservationResponse response = reservationService.createReservation(IDEMPOTENCY_KEY, request);
 
@@ -97,8 +97,8 @@ class ReservationServiceTest {
         assertThat(response.getReservationId()).isNotBlank();
         assertThat(response.getExpiresAt()).isNotNull();
 
-        verify(reservationRecordMapper).insert(any());
-        verify(idempotencyService).markSucceeded(eq("idem-record-id-001"), eq("RESERVATION"), anyString(), any());
+        verify(reservationRecordMapper).insert(any(ReservationRecord.class));
+        verify(idempotencyService).markSucceeded(eq("idem-record-id-001"), eq("RESERVATION"), anyString(), any(CreateReservationResponse.class));
     }
 
     @Test
@@ -110,25 +110,24 @@ class ReservationServiceTest {
         when(catalogService.validateAndGetActiveItem(CATALOG_ITEM_ID)).thenReturn(activeCatalogItem());
         when(inventoryService.getActiveInventory(INVENTORY_RESOURCE_ID)).thenReturn(activeInventory());
         doThrow(new BusinessException(ErrorCode.INSUFFICIENT_INVENTORY))
-                .when(inventoryService).lockQuantity(any(), eq(2));
+                .when(inventoryService).lockQuantity(any(InventoryResource.class), eq(2));
 
         assertThatThrownBy(() -> reservationService.createReservation(IDEMPOTENCY_KEY, request))
                 .isInstanceOf(BusinessException.class)
                 .extracting(e -> ((BusinessException) e).getErrorCode())
                 .isEqualTo(ErrorCode.INSUFFICIENT_INVENTORY);
 
-        verify(reservationRecordMapper, never()).insert(any());
+        verify(reservationRecordMapper, never()).insert(any(ReservationRecord.class));
         verify(idempotencyService, never()).markSucceeded(anyString(), anyString(), anyString(), any());
     }
 
     @Test
-    void createReservation_idempotentReplay_returnsCachedResponse() throws Exception {
+    void createReservation_idempotentReplay_returnsCachedResponse() {
         CreateReservationRequest request = buildRequest();
-        String cachedJson = "{\"reservationId\":\"cached-id\",\"status\":\"ACTIVE\"}";
         IdempotencyRecord succeededRecord = new IdempotencyRecord();
         succeededRecord.setIdempotencyRecordId("idem-record-id-001");
         succeededRecord.setStatus("SUCCEEDED");
-        succeededRecord.setResponsePayload(cachedJson);
+        succeededRecord.setResponsePayload("{\"reservationId\":\"cached-id\",\"status\":\"ACTIVE\"}");
         CreateReservationResponse cachedResponse = CreateReservationResponse.builder()
                 .reservationId("cached-id").status("ACTIVE").build();
 
@@ -142,8 +141,6 @@ class ReservationServiceTest {
 
         assertThat(response.getReservationId()).isEqualTo("cached-id");
         verify(catalogService, never()).validateAndGetActiveItem(anyString());
-        verify(reservationRecordMapper, never()).insert(any());
+        verify(reservationRecordMapper, never()).insert(any(ReservationRecord.class));
     }
-
-    private static final String ACTION_NAME = "CREATE_RESERVATION";
 }

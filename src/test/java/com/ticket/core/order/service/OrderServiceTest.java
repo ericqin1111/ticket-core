@@ -8,6 +8,7 @@ import com.ticket.core.idempotency.service.IdempotencyService;
 import com.ticket.core.order.dto.BuyerDto;
 import com.ticket.core.order.dto.CreateOrderRequest;
 import com.ticket.core.order.dto.CreateOrderResponse;
+import com.ticket.core.order.entity.TicketOrder;
 import com.ticket.core.order.mapper.TicketOrderMapper;
 import com.ticket.core.reservation.entity.ReservationRecord;
 import com.ticket.core.reservation.mapper.ReservationRecordMapper;
@@ -35,6 +36,7 @@ class OrderServiceTest {
     @InjectMocks
     private OrderService orderService;
 
+    private static final String ACTION_NAME = "CREATE_ORDER";
     private static final String IDEMPOTENCY_KEY = "order-idem-key-001";
     private static final String RESERVATION_ID = "res-001";
     private static final String EXTERNAL_TRADE_NO = "trade-20260407-001";
@@ -75,9 +77,9 @@ class OrderServiceTest {
         when(idempotencyService.checkAndMarkProcessing(ACTION_NAME, IDEMPOTENCY_KEY, "hash-order-001", EXTERNAL_TRADE_NO))
                 .thenReturn(processingRecord());
         when(reservationRecordMapper.selectById(RESERVATION_ID)).thenReturn(activeReservation());
-        when(reservationRecordMapper.updateById(any())).thenReturn(1);
-        when(ticketOrderMapper.insert(any())).thenReturn(1);
-        doNothing().when(idempotencyService).markSucceeded(anyString(), eq("ORDER"), anyString(), any());
+        when(reservationRecordMapper.updateById(any(ReservationRecord.class))).thenReturn(1);
+        when(ticketOrderMapper.insert(any(TicketOrder.class))).thenReturn(1);
+        doNothing().when(idempotencyService).markSucceeded(anyString(), eq("ORDER"), anyString(), any(CreateOrderResponse.class));
 
         CreateOrderResponse response = orderService.createOrder(IDEMPOTENCY_KEY, request);
 
@@ -87,9 +89,9 @@ class OrderServiceTest {
         assertThat(response.getOrderId()).isNotBlank();
         assertThat(response.getPaymentDeadlineAt()).isNotNull();
 
-        verify(reservationRecordMapper).updateById(argThat(r ->
+        verify(reservationRecordMapper).updateById(argThat((ReservationRecord r) ->
                 "CONSUMED".equals(r.getStatus()) && RESERVATION_ID.equals(r.getReservationId())));
-        verify(ticketOrderMapper).insert(argThat(o ->
+        verify(ticketOrderMapper).insert(argThat((TicketOrder o) ->
                 "PENDING_PAYMENT".equals(o.getStatus()) && RESERVATION_ID.equals(o.getReservationId())));
     }
 
@@ -109,14 +111,14 @@ class OrderServiceTest {
                 .extracting(e -> ((BusinessException) e).getErrorCode())
                 .isEqualTo(ErrorCode.RESERVATION_ALREADY_CONSUMED);
 
-        verify(ticketOrderMapper, never()).insert(any());
+        verify(ticketOrderMapper, never()).insert(any(TicketOrder.class));
     }
 
     @Test
     void createOrder_reservationExpired_throwsBusinessException() {
         CreateOrderRequest request = buildRequest();
         ReservationRecord expired = activeReservation();
-        expired.setExpiresAt(LocalDateTime.now().minusMinutes(1)); // already past expiry
+        expired.setExpiresAt(LocalDateTime.now().minusMinutes(1));
 
         when(idempotencyService.hashRequest(request)).thenReturn("hash-order-003");
         when(idempotencyService.checkAndMarkProcessing(ACTION_NAME, IDEMPOTENCY_KEY, "hash-order-003", EXTERNAL_TRADE_NO))
@@ -128,7 +130,7 @@ class OrderServiceTest {
                 .extracting(e -> ((BusinessException) e).getErrorCode())
                 .isEqualTo(ErrorCode.RESERVATION_EXPIRED);
 
-        verify(ticketOrderMapper, never()).insert(any());
+        verify(ticketOrderMapper, never()).insert(any(TicketOrder.class));
     }
 
     @Test
@@ -138,15 +140,13 @@ class OrderServiceTest {
         when(idempotencyService.checkAndMarkProcessing(ACTION_NAME, IDEMPOTENCY_KEY, "hash-order-004", EXTERNAL_TRADE_NO))
                 .thenReturn(processingRecord());
         when(reservationRecordMapper.selectById(RESERVATION_ID)).thenReturn(activeReservation());
-        when(reservationRecordMapper.updateById(any())).thenReturn(0); // concurrent winner consumed it first
+        when(reservationRecordMapper.updateById(any(ReservationRecord.class))).thenReturn(0);
 
         assertThatThrownBy(() -> orderService.createOrder(IDEMPOTENCY_KEY, request))
                 .isInstanceOf(BusinessException.class)
                 .extracting(e -> ((BusinessException) e).getErrorCode())
                 .isEqualTo(ErrorCode.RESERVATION_ALREADY_CONSUMED);
 
-        verify(ticketOrderMapper, never()).insert(any());
+        verify(ticketOrderMapper, never()).insert(any(TicketOrder.class));
     }
-
-    private static final String ACTION_NAME = "CREATE_ORDER";
 }
