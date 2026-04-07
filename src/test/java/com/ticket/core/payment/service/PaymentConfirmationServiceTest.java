@@ -1,6 +1,8 @@
 package com.ticket.core.payment.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ticket.core.common.exception.BusinessException;
+import com.ticket.core.common.exception.ErrorCode;
 import com.ticket.core.fulfillment.entity.FulfillmentRecord;
 import com.ticket.core.fulfillment.mapper.FulfillmentRecordMapper;
 import com.ticket.core.fulfillment.service.FulfillmentService;
@@ -87,11 +89,125 @@ class PaymentConfirmationServiceTest {
                 ticketOrderMapper, idempotencyService, fulfillmentService, new ObjectMapper());
 
         assertThatThrownBy(() -> service.confirmPayment("idem-key-002", request))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("Order confirmation update did not succeed.");
+                .isInstanceOf(BusinessException.class)
+                .extracting(e -> ((BusinessException) e).getErrorCode())
+                .isEqualTo(ErrorCode.PAYMENT_CONFIRMATION_IN_PROGRESS);
 
         assertThat(fulfillmentService.createdRecord).isNull();
         assertThat(idempotencyService.markedResourceId).isNull();
+    }
+
+    @Test
+    void confirmPayment_sameIdempotencyKeySucceeded_replaysCachedResponse() {
+        PaymentConfirmationResponse cached = PaymentConfirmationResponse.builder()
+                .orderId("order-confirm-001")
+                .externalTradeNo("trade-confirm-001")
+                .orderStatus("CONFIRMED")
+                .fulfillmentId("ful-existing-001")
+                .fulfillmentStatus("PENDING")
+                .paymentConfirmationStatus("APPLIED")
+                .confirmedAt(OffsetDateTime.parse("2026-04-07T08:30:00Z"))
+                .build();
+        RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(succeededRecord());
+        idempotencyService.replayedResponse = cached;
+        PaymentConfirmationService service = new PaymentConfirmationService(
+                ticketOrderMapperProxy(null, 0, new AtomicReference<>(), new AtomicReference<>(),
+                        new AtomicReference<>(), new AtomicReference<>()),
+                idempotencyService,
+                new RecordingFulfillmentService(),
+                new ObjectMapper());
+
+        PaymentConfirmationResponse response = service.confirmPayment("idem-key-003", buildRequest());
+
+        assertThat(response.getPaymentConfirmationStatus()).isEqualTo("REPLAYED");
+        assertThat(response.getFulfillmentId()).isEqualTo("ful-existing-001");
+        assertThat(idempotencyService.markedResourceId).isNull();
+    }
+
+    @Test
+    void confirmPayment_differentKeyForConfirmedOrder_returnsReplayedAndCachesStableResult() {
+        TicketOrderMapper ticketOrderMapper = ticketOrderMapperProxy(
+                confirmedOrder(), 0, new AtomicReference<>(), new AtomicReference<>(),
+                new AtomicReference<>(), new AtomicReference<>());
+        RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(processingRecord());
+        RecordingFulfillmentService fulfillmentService = new RecordingFulfillmentService();
+        fulfillmentService.foundRecord = existingFulfillment();
+        PaymentConfirmationService service = new PaymentConfirmationService(
+                ticketOrderMapper, idempotencyService, fulfillmentService, new ObjectMapper());
+
+        PaymentConfirmationResponse response = service.confirmPayment("idem-key-004", buildRequest());
+
+        assertThat(response.getPaymentConfirmationStatus()).isEqualTo("REPLAYED");
+        assertThat(response.getFulfillmentId()).isEqualTo("ful-existing-001");
+        assertThat(idempotencyService.markedResourceType).isEqualTo("FULFILLMENT");
+        assertThat(idempotencyService.markedResourceId).isEqualTo("ful-existing-001");
+    }
+
+    @Test
+    void confirmPayment_processingDuplicate_returnsInProgress() {
+        IdempotencyRecord inProgress = processingRecord();
+        inProgress.setNewlyCreated(false);
+        RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(inProgress);
+        PaymentConfirmationService service = new PaymentConfirmationService(
+                ticketOrderMapperProxy(pendingOrder(), 1, new AtomicReference<>(), new AtomicReference<>(),
+                        new AtomicReference<>(), new AtomicReference<>()),
+                idempotencyService,
+                new RecordingFulfillmentService(),
+                new ObjectMapper());
+
+        assertThatThrownBy(() -> service.confirmPayment("idem-key-005", buildRequest()))
+                .isInstanceOf(BusinessException.class)
+                .extracting(e -> ((BusinessException) e).getErrorCode())
+                .isEqualTo(ErrorCode.PAYMENT_CONFIRMATION_IN_PROGRESS);
+    }
+
+    @Test
+    void confirmPayment_orderNotFound_returnsBusinessException() {
+        RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(processingRecord());
+        PaymentConfirmationService service = new PaymentConfirmationService(
+                ticketOrderMapperProxy(null, 0, new AtomicReference<>(), new AtomicReference<>(),
+                        new AtomicReference<>(), new AtomicReference<>()),
+                idempotencyService,
+                new RecordingFulfillmentService(),
+                new ObjectMapper());
+
+        assertThatThrownBy(() -> service.confirmPayment("idem-key-006", buildRequest()))
+                .isInstanceOf(BusinessException.class)
+                .extracting(e -> ((BusinessException) e).getErrorCode())
+                .isEqualTo(ErrorCode.ORDER_NOT_FOUND);
+    }
+
+    @Test
+    void confirmPayment_orderClosed_returnsOrderNotConfirmable() {
+        RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(processingRecord());
+        PaymentConfirmationService service = new PaymentConfirmationService(
+                ticketOrderMapperProxy(closedOrder(), 0, new AtomicReference<>(), new AtomicReference<>(),
+                        new AtomicReference<>(), new AtomicReference<>()),
+                idempotencyService,
+                new RecordingFulfillmentService(),
+                new ObjectMapper());
+
+        assertThatThrownBy(() -> service.confirmPayment("idem-key-007", buildRequest()))
+                .isInstanceOf(BusinessException.class)
+                .extracting(e -> ((BusinessException) e).getErrorCode())
+                .isEqualTo(ErrorCode.ORDER_NOT_CONFIRMABLE);
+    }
+
+    @Test
+    void confirmPayment_confirmedOrderWithoutFulfillment_returnsInvariantBroken() {
+        RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(processingRecord());
+        RecordingFulfillmentService fulfillmentService = new RecordingFulfillmentService();
+        PaymentConfirmationService service = new PaymentConfirmationService(
+                ticketOrderMapperProxy(confirmedOrder(), 0, new AtomicReference<>(), new AtomicReference<>(),
+                        new AtomicReference<>(), new AtomicReference<>()),
+                idempotencyService,
+                fulfillmentService,
+                new ObjectMapper());
+
+        assertThatThrownBy(() -> service.confirmPayment("idem-key-008", buildRequest()))
+                .isInstanceOf(BusinessException.class)
+                .extracting(e -> ((BusinessException) e).getErrorCode())
+                .isEqualTo(ErrorCode.FULFILLMENT_INVARIANT_BROKEN);
     }
 
     private PaymentConfirmationRequest buildRequest() {
@@ -117,10 +233,40 @@ class PaymentConfirmationServiceTest {
         return order;
     }
 
+    private TicketOrder confirmedOrder() {
+        TicketOrder order = pendingOrder();
+        order.setStatus("CONFIRMED");
+        order.setConfirmedAt(LocalDateTime.of(2026, 4, 7, 8, 30));
+        return order;
+    }
+
+    private TicketOrder closedOrder() {
+        TicketOrder order = pendingOrder();
+        order.setStatus("CLOSED");
+        return order;
+    }
+
     private IdempotencyRecord processingRecord() {
         IdempotencyRecord record = new IdempotencyRecord();
         record.setIdempotencyRecordId("idem-record-001");
         record.setStatus("PROCESSING");
+        record.setNewlyCreated(true);
+        return record;
+    }
+
+    private IdempotencyRecord succeededRecord() {
+        IdempotencyRecord record = processingRecord();
+        record.setStatus("SUCCEEDED");
+        record.setNewlyCreated(false);
+        return record;
+    }
+
+    private FulfillmentRecord existingFulfillment() {
+        FulfillmentRecord record = new FulfillmentRecord();
+        record.setFulfillmentId("ful-existing-001");
+        record.setOrderId("order-confirm-001");
+        record.setStatus("PENDING");
+        record.setConfirmedAt(LocalDateTime.of(2026, 4, 7, 8, 30));
         return record;
     }
 
@@ -166,6 +312,7 @@ class PaymentConfirmationServiceTest {
         private String markedResourceType;
         private String markedResourceId;
         private Object markedResponseBody;
+        private PaymentConfirmationResponse replayedResponse;
 
         private RecordingIdempotencyService(IdempotencyRecord recordToReturn) {
             super(dummyIdempotencyMapper(), new ObjectMapper());
@@ -194,6 +341,11 @@ class PaymentConfirmationServiceTest {
             this.markedResponseBody = responseBody;
         }
 
+        @Override
+        public <T> T replayResponse(IdempotencyRecord record, Class<T> responseClass) {
+            return responseClass.cast(replayedResponse);
+        }
+
         private static IdempotencyRecordMapper dummyIdempotencyMapper() {
             return (IdempotencyRecordMapper) Proxy.newProxyInstance(
                     IdempotencyRecordMapper.class.getClassLoader(),
@@ -205,6 +357,7 @@ class PaymentConfirmationServiceTest {
     private static final class RecordingFulfillmentService extends FulfillmentService {
 
         private FulfillmentRecord createdRecord;
+        private FulfillmentRecord foundRecord;
 
         private RecordingFulfillmentService() {
             super(dummyFulfillmentMapper());
@@ -213,6 +366,11 @@ class PaymentConfirmationServiceTest {
         @Override
         public void create(FulfillmentRecord fulfillmentRecord) {
             this.createdRecord = fulfillmentRecord;
+        }
+
+        @Override
+        public FulfillmentRecord findByOrderId(String orderId) {
+            return foundRecord;
         }
 
         private static FulfillmentRecordMapper dummyFulfillmentMapper() {

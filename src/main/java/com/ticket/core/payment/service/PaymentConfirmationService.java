@@ -2,6 +2,8 @@ package com.ticket.core.payment.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ticket.core.common.exception.BusinessException;
+import com.ticket.core.common.exception.ErrorCode;
 import com.ticket.core.idempotency.entity.IdempotencyRecord;
 import com.ticket.core.idempotency.service.IdempotencyService;
 import com.ticket.core.fulfillment.entity.FulfillmentRecord;
@@ -39,12 +41,21 @@ public class PaymentConfirmationService {
                 ACTION_NAME, idempotencyKey, requestHash, request.getExternalTradeNo());
 
         if ("SUCCEEDED".equals(idemRecord.getStatus())) {
-            throw new UnsupportedOperationException("RFC-TKT001-02 Step 4 will implement replay success handling.");
+            return asReplayed(idempotencyService.replayResponse(idemRecord, PaymentConfirmationResponse.class));
+        }
+        if ("PROCESSING".equals(idemRecord.getStatus()) && !idemRecord.isNewlyCreated()) {
+            throw new BusinessException(ErrorCode.PAYMENT_CONFIRMATION_IN_PROGRESS);
         }
 
         TicketOrder order = ticketOrderMapper.selectByExternalTradeNo(request.getExternalTradeNo());
-        if (order == null || !"PENDING_PAYMENT".equals(order.getStatus())) {
-            throw new UnsupportedOperationException("RFC-TKT001-02 Step 4 will implement replay and rejection branches.");
+        if (order == null) {
+            throw new BusinessException(ErrorCode.ORDER_NOT_FOUND);
+        }
+        if ("CONFIRMED".equals(order.getStatus())) {
+            return replayConfirmedOrder(order, idemRecord);
+        }
+        if (!"PENDING_PAYMENT".equals(order.getStatus())) {
+            throw new BusinessException(ErrorCode.ORDER_NOT_CONFIRMABLE);
         }
 
         LocalDateTime confirmedAtUtc = request.getConfirmedAt()
@@ -53,7 +64,7 @@ public class PaymentConfirmationService {
         long currentVersion = order.getVersion() == null ? 0L : order.getVersion();
         int updated = ticketOrderMapper.confirmPendingPayment(order.getOrderId(), confirmedAtUtc, currentVersion);
         if (updated == 0) {
-            throw new IllegalStateException("Order confirmation update did not succeed.");
+            return resolveAfterConcurrentUpdate(request.getExternalTradeNo(), idemRecord);
         }
 
         FulfillmentRecord fulfillmentRecord = new FulfillmentRecord();
@@ -85,6 +96,63 @@ public class PaymentConfirmationService {
         log.info("Payment confirmation applied: externalTradeNo={}, orderId={}, fulfillmentId={}",
                 order.getExternalTradeNo(), order.getOrderId(), fulfillmentRecord.getFulfillmentId());
         return response;
+    }
+
+    private PaymentConfirmationResponse replayConfirmedOrder(TicketOrder order, IdempotencyRecord idemRecord) {
+        FulfillmentRecord fulfillmentRecord = fulfillmentService.findByOrderId(order.getOrderId());
+        if (fulfillmentRecord == null || !"PENDING".equals(fulfillmentRecord.getStatus())) {
+            throw new BusinessException(ErrorCode.FULFILLMENT_INVARIANT_BROKEN);
+        }
+
+        PaymentConfirmationResponse response = buildResponse(
+                order.getOrderId(),
+                order.getExternalTradeNo(),
+                fulfillmentRecord.getFulfillmentId(),
+                fulfillmentRecord.getConfirmedAt().atOffset(ZoneOffset.UTC),
+                "REPLAYED");
+
+        if (!"SUCCEEDED".equals(idemRecord.getStatus())) {
+            idempotencyService.markSucceeded(idemRecord.getIdempotencyRecordId(),
+                    RESOURCE_TYPE, fulfillmentRecord.getFulfillmentId(), response);
+        }
+        return response;
+    }
+
+    private PaymentConfirmationResponse resolveAfterConcurrentUpdate(String externalTradeNo, IdempotencyRecord idemRecord) {
+        TicketOrder latestOrder = ticketOrderMapper.selectByExternalTradeNo(externalTradeNo);
+        if (latestOrder == null) {
+            throw new BusinessException(ErrorCode.PAYMENT_CONFIRMATION_IN_PROGRESS);
+        }
+        if ("CONFIRMED".equals(latestOrder.getStatus())) {
+            return replayConfirmedOrder(latestOrder, idemRecord);
+        }
+        if ("PENDING_PAYMENT".equals(latestOrder.getStatus())) {
+            throw new BusinessException(ErrorCode.PAYMENT_CONFIRMATION_IN_PROGRESS);
+        }
+        throw new BusinessException(ErrorCode.ORDER_NOT_CONFIRMABLE);
+    }
+
+    private PaymentConfirmationResponse asReplayed(PaymentConfirmationResponse response) {
+        return buildResponse(
+                response.getOrderId(),
+                response.getExternalTradeNo(),
+                response.getFulfillmentId(),
+                response.getConfirmedAt(),
+                "REPLAYED");
+    }
+
+    private PaymentConfirmationResponse buildResponse(String orderId, String externalTradeNo,
+                                                      String fulfillmentId, java.time.OffsetDateTime confirmedAt,
+                                                      String confirmationStatus) {
+        return PaymentConfirmationResponse.builder()
+                .orderId(orderId)
+                .externalTradeNo(externalTradeNo)
+                .orderStatus("CONFIRMED")
+                .fulfillmentId(fulfillmentId)
+                .fulfillmentStatus("PENDING")
+                .paymentConfirmationStatus(confirmationStatus)
+                .confirmedAt(confirmedAt)
+                .build();
     }
 
     private String toJson(Object obj) {

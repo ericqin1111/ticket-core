@@ -66,6 +66,7 @@ public class IdempotencyService {
                 log.warn("Idempotency conflict detected: action={}, key={}", actionName, idempotencyKey);
                 throw new BusinessException(ErrorCode.IDEMPOTENCY_CONFLICT);
             }
+            existing.setNewlyCreated(false);
             return existing;
         }
 
@@ -79,6 +80,7 @@ public class IdempotencyService {
 
         try {
             mapper.insert(record);
+            record.setNewlyCreated(true);
             return record; // newly created PROCESSING record — caller must execute business logic
         } catch (DuplicateKeyException e) {
             // Concurrent insert won; re-read under READ_COMMITTED so the committed row is visible
@@ -91,6 +93,7 @@ public class IdempotencyService {
             if (!existing.getRequestHash().equals(requestHash)) {
                 throw new BusinessException(ErrorCode.IDEMPOTENCY_CONFLICT);
             }
+            existing.setNewlyCreated(false);
             return existing;
         }
     }
