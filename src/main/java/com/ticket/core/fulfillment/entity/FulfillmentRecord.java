@@ -1,4 +1,4 @@
-package com.ticket.core.order.entity;
+package com.ticket.core.fulfillment.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
@@ -9,21 +9,19 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 @Data
-@TableName("ticket_order")
-public class TicketOrder {
+@TableName("fulfillment_record")
+public class FulfillmentRecord {
 
     @TableId(type = IdType.INPUT)
+    private String fulfillmentId;
     private String orderId;
-    private String externalTradeNo;
-    private String reservationId;
-    /** PENDING_PAYMENT, CONFIRMED, CLOSED */
+    /** PENDING */
     private String status;
-    private String buyerRef;
-    private String contactPhone;
-    private String contactEmail;
-    private String submissionContextJson;
-    private LocalDateTime paymentDeadlineAt;
+    private String paymentProvider;
+    private String providerEventId;
+    private String providerPaymentId;
     private LocalDateTime confirmedAt;
+    private String channelContextJson;
     @Version
     private Long version;
     private LocalDateTime createdAt;

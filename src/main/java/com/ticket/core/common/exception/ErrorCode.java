@@ -13,6 +13,10 @@ public enum ErrorCode {
     RESERVATION_NOT_FOUND("RESERVATION_NOT_FOUND", "The specified reservation does not exist.", HttpStatus.NOT_FOUND, false),
     RESERVATION_ALREADY_CONSUMED("RESERVATION_ALREADY_CONSUMED", "The reservation has already been consumed.", HttpStatus.CONFLICT, false),
     RESERVATION_EXPIRED("RESERVATION_EXPIRED", "The reservation has expired.", HttpStatus.GONE, false),
+    ORDER_NOT_FOUND("ORDER_NOT_FOUND", "The specified order does not exist.", HttpStatus.NOT_FOUND, false),
+    ORDER_NOT_CONFIRMABLE("ORDER_NOT_CONFIRMABLE", "The order is not in a confirmable state.", HttpStatus.CONFLICT, false),
+    PAYMENT_CONFIRMATION_IN_PROGRESS("PAYMENT_CONFIRMATION_IN_PROGRESS", "A payment confirmation for this request is already in progress.", HttpStatus.CONFLICT, true),
+    FULFILLMENT_INVARIANT_BROKEN("FULFILLMENT_INVARIANT_BROKEN", "The confirmed order does not have a stable fulfillment projection.", HttpStatus.CONFLICT, false),
     IDEMPOTENCY_CONFLICT("IDEMPOTENCY_CONFLICT", "The idempotency key was used with a different request payload.", HttpStatus.CONFLICT, false);
 
     private final String code;

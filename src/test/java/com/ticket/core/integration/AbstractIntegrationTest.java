@@ -3,6 +3,8 @@ package com.ticket.core.integration;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.ticket.core.catalog.entity.CatalogItem;
 import com.ticket.core.catalog.mapper.CatalogItemMapper;
+import com.ticket.core.fulfillment.entity.FulfillmentRecord;
+import com.ticket.core.fulfillment.mapper.FulfillmentRecordMapper;
 import com.ticket.core.idempotency.entity.IdempotencyRecord;
 import com.ticket.core.idempotency.mapper.IdempotencyRecordMapper;
 import com.ticket.core.inventory.entity.InventoryResource;
@@ -51,6 +53,8 @@ public abstract class AbstractIntegrationTest {
     @Autowired
     protected TicketOrderMapper ticketOrderMapper;
     @Autowired
+    protected FulfillmentRecordMapper fulfillmentRecordMapper;
+    @Autowired
     protected IdempotencyRecordMapper idempotencyRecordMapper;
 
     /**
@@ -59,6 +63,7 @@ public abstract class AbstractIntegrationTest {
      */
     @BeforeEach
     void truncateAllTables() {
+        fulfillmentRecordMapper.delete(new LambdaQueryWrapper<FulfillmentRecord>().isNotNull(FulfillmentRecord::getFulfillmentId));
         ticketOrderMapper.delete(new LambdaQueryWrapper<TicketOrder>().isNotNull(TicketOrder::getOrderId));
         reservationRecordMapper.delete(new LambdaQueryWrapper<ReservationRecord>().isNotNull(ReservationRecord::getReservationId));
         idempotencyRecordMapper.delete(new LambdaQueryWrapper<IdempotencyRecord>().isNotNull(IdempotencyRecord::getIdempotencyRecordId));
@@ -112,7 +117,20 @@ public abstract class AbstractIntegrationTest {
         order.setStatus("PENDING_PAYMENT");
         order.setBuyerRef("test-buyer");
         order.setPaymentDeadlineAt(LocalDateTime.now().plusMinutes(30));
+        order.setVersion(0L);
         ticketOrderMapper.insert(order);
+    }
+
+    protected void insertFulfillment(String fulfillmentId, String orderId, LocalDateTime confirmedAt) {
+        FulfillmentRecord record = new FulfillmentRecord();
+        record.setFulfillmentId(fulfillmentId);
+        record.setOrderId(orderId);
+        record.setStatus("PENDING");
+        record.setPaymentProvider("MOCK_PROVIDER");
+        record.setProviderEventId("mock-event-" + fulfillmentId);
+        record.setConfirmedAt(confirmedAt);
+        record.setVersion(0L);
+        fulfillmentRecordMapper.insert(record);
     }
 
     // ── HTTP request helpers ─────────────────────────────────────────────────
