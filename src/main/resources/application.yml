@@ -7,6 +7,9 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+  jackson:
+    serialization:
+      order-map-entries-by-keys: true
 
 mybatis-plus:
   configuration:
@@ -17,11 +20,6 @@ mybatis-plus:
 
 server:
   port: 8080
-
-spring:
-  jackson:
-    serialization:
-      order-map-entries-by-keys: true
 
 ticket:
   order:

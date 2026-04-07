@@ -110,13 +110,19 @@ public abstract class AbstractIntegrationTest {
     }
 
     protected void insertOrder(String orderId, String externalTradeNo, String reservationId) {
+        insertOrder(orderId, externalTradeNo, reservationId, "PENDING_PAYMENT", null);
+    }
+
+    protected void insertOrder(String orderId, String externalTradeNo, String reservationId,
+                               String status, LocalDateTime confirmedAt) {
         TicketOrder order = new TicketOrder();
         order.setOrderId(orderId);
         order.setExternalTradeNo(externalTradeNo);
         order.setReservationId(reservationId);
-        order.setStatus("PENDING_PAYMENT");
+        order.setStatus(status);
         order.setBuyerRef("test-buyer");
         order.setPaymentDeadlineAt(LocalDateTime.now().plusMinutes(30));
+        order.setConfirmedAt(confirmedAt);
         order.setVersion(0L);
         ticketOrderMapper.insert(order);
     }
