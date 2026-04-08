@@ -1,6 +1,8 @@
 package com.ticket.core.order.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ticket.core.audit.entity.AuditTrailEvent;
+import com.ticket.core.audit.service.AuditTrailService;
 import com.ticket.core.common.exception.BusinessException;
 import com.ticket.core.common.exception.ErrorCode;
 import com.ticket.core.idempotency.entity.IdempotencyRecord;
@@ -15,6 +17,7 @@ import com.ticket.core.reservation.mapper.ReservationRecordMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -34,6 +37,7 @@ class OrderServiceTest {
     @Mock private ReservationRecordMapper reservationRecordMapper;
     @Mock private IdempotencyService idempotencyService;
     @Mock private ObjectMapper objectMapper;
+    @Mock private AuditTrailService auditTrailService;
 
     @InjectMocks
     private OrderService orderService;
@@ -96,10 +100,14 @@ class OrderServiceTest {
         assertThat(response.getOrderId()).isNotBlank();
         assertThat(response.getPaymentDeadlineAt()).isNotNull();
 
+        ArgumentCaptor<AuditTrailEvent> eventCaptor = ArgumentCaptor.forClass(AuditTrailEvent.class);
         verify(reservationRecordMapper).updateById(argThat((ReservationRecord r) ->
                 "CONSUMED".equals(r.getStatus()) && RESERVATION_ID.equals(r.getReservationId())));
         verify(ticketOrderMapper).insert(argThat((TicketOrder o) ->
                 "PENDING_PAYMENT".equals(o.getStatus()) && RESERVATION_ID.equals(o.getReservationId())));
+        verify(auditTrailService, times(2)).append(eventCaptor.capture());
+        assertThat(eventCaptor.getAllValues()).extracting(AuditTrailEvent::getEventType)
+                .containsExactly("RESERVATION_CONSUMED", "ORDER_CREATED");
     }
 
     @Test
@@ -155,5 +163,24 @@ class OrderServiceTest {
                 .isEqualTo(ErrorCode.RESERVATION_ALREADY_CONSUMED);
 
         verify(ticketOrderMapper, never()).insert(any(TicketOrder.class));
+    }
+
+    @Test
+    void createOrder_auditAppendFails_propagatesExceptionAndDoesNotMarkSuccess() {
+        CreateOrderRequest request = buildRequest();
+        when(idempotencyService.hashRequest(request)).thenReturn("hash-order-005");
+        when(idempotencyService.checkAndMarkProcessing(ACTION_NAME, IDEMPOTENCY_KEY, "hash-order-005", EXTERNAL_TRADE_NO))
+                .thenReturn(processingRecord());
+        when(reservationRecordMapper.selectById(RESERVATION_ID)).thenReturn(activeReservation());
+        when(reservationRecordMapper.updateById(any(ReservationRecord.class))).thenReturn(1);
+        when(ticketOrderMapper.insert(any(TicketOrder.class))).thenReturn(1);
+        doThrow(new IllegalStateException("audit append failed"))
+                .when(auditTrailService).append(any(AuditTrailEvent.class));
+
+        assertThatThrownBy(() -> orderService.createOrder(IDEMPOTENCY_KEY, request))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("audit append failed");
+
+        verify(idempotencyService, never()).markSucceeded(anyString(), anyString(), anyString(), any());
     }
 }

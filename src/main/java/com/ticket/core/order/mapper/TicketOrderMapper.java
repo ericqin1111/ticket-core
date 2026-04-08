@@ -8,14 +8,24 @@ import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Mapper
 public interface TicketOrderMapper extends BaseMapper<TicketOrder> {
 
     @Select("SELECT order_id, external_trade_no, reservation_id, status, buyer_ref, contact_phone, " +
-            "contact_email, submission_context_json, payment_deadline_at, confirmed_at, version, created_at, updated_at " +
+            "contact_email, submission_context_json, payment_deadline_at, confirmed_at, closed_at, version, created_at, updated_at " +
             "FROM ticket_order WHERE external_trade_no = #{externalTradeNo} LIMIT 1")
     TicketOrder selectByExternalTradeNo(@Param("externalTradeNo") String externalTradeNo);
+
+    @Select("SELECT order_id, external_trade_no, reservation_id, status, buyer_ref, contact_phone, " +
+            "contact_email, submission_context_json, payment_deadline_at, confirmed_at, closed_at, version, created_at, updated_at " +
+            "FROM ticket_order " +
+            "WHERE status = 'PENDING_PAYMENT' AND payment_deadline_at <= #{deadlineAt} " +
+            "ORDER BY payment_deadline_at ASC " +
+            "LIMIT #{limit}")
+    List<TicketOrder> selectOverduePendingPaymentOrders(@Param("deadlineAt") LocalDateTime deadlineAt,
+                                                        @Param("limit") int limit);
 
     @Update("UPDATE ticket_order " +
             "SET status = 'CONFIRMED', confirmed_at = #{confirmedAt}, version = version + 1, updated_at = NOW(3) " +
@@ -23,4 +33,11 @@ public interface TicketOrderMapper extends BaseMapper<TicketOrder> {
     int confirmPendingPayment(@Param("orderId") String orderId,
                               @Param("confirmedAt") LocalDateTime confirmedAt,
                               @Param("version") long version);
+
+    @Update("UPDATE ticket_order " +
+            "SET status = 'CLOSED', closed_at = #{closedAt}, version = version + 1, updated_at = NOW(3) " +
+            "WHERE order_id = #{orderId} AND status = 'PENDING_PAYMENT' AND version = #{version}")
+    int closePendingPayment(@Param("orderId") String orderId,
+                            @Param("closedAt") LocalDateTime closedAt,
+                            @Param("version") long version);
 }

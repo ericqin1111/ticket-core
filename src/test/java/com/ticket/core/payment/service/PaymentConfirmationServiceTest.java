@@ -1,6 +1,8 @@
 package com.ticket.core.payment.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ticket.core.audit.entity.AuditTrailEvent;
+import com.ticket.core.audit.service.AuditTrailService;
 import com.ticket.core.common.exception.BusinessException;
 import com.ticket.core.common.exception.ErrorCode;
 import com.ticket.core.fulfillment.entity.FulfillmentRecord;
@@ -14,6 +16,7 @@ import com.ticket.core.order.mapper.TicketOrderMapper;
 import com.ticket.core.payment.dto.PaymentConfirmationRequest;
 import com.ticket.core.payment.dto.PaymentConfirmationResponse;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.lang.reflect.Proxy;
 import java.time.LocalDateTime;
@@ -25,6 +28,12 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.doThrow;
 
 class PaymentConfirmationServiceTest {
 
@@ -40,8 +49,9 @@ class PaymentConfirmationServiceTest {
                 order, 1, selectedTradeNo, confirmedOrderId, confirmedAt, confirmedVersion);
         RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(processingRecord());
         RecordingFulfillmentService fulfillmentService = new RecordingFulfillmentService();
+        AuditTrailService auditTrailService = mock(AuditTrailService.class);
         PaymentConfirmationService service = new PaymentConfirmationService(
-                ticketOrderMapper, idempotencyService, fulfillmentService, new ObjectMapper());
+                ticketOrderMapper, idempotencyService, fulfillmentService, new ObjectMapper(), auditTrailService);
 
         PaymentConfirmationResponse response = service.confirmPayment("idem-key-001", request);
 
@@ -75,6 +85,11 @@ class PaymentConfirmationServiceTest {
         assertThat(fulfillmentService.createdRecord.getConfirmedAt()).isEqualTo(LocalDateTime.of(2026, 4, 7, 8, 30));
         assertThat(fulfillmentService.createdRecord.getChannelContextJson())
                 .isEqualTo("{\"channel\":\"wechat\",\"traceId\":\"trace-001\"}");
+
+        ArgumentCaptor<AuditTrailEvent> eventCaptor = ArgumentCaptor.forClass(AuditTrailEvent.class);
+        verify(auditTrailService, times(3)).append(eventCaptor.capture());
+        assertThat(eventCaptor.getAllValues()).extracting(AuditTrailEvent::getEventType)
+                .containsExactly("ORDER_CONFIRMED", "FULFILLMENT_CREATED", "PAYMENT_CONFIRMATION_APPLIED");
     }
 
     @Test
@@ -85,8 +100,9 @@ class PaymentConfirmationServiceTest {
                 new AtomicReference<>(), new AtomicReference<>());
         RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(processingRecord());
         RecordingFulfillmentService fulfillmentService = new RecordingFulfillmentService();
+        AuditTrailService auditTrailService = mock(AuditTrailService.class);
         PaymentConfirmationService service = new PaymentConfirmationService(
-                ticketOrderMapper, idempotencyService, fulfillmentService, new ObjectMapper());
+                ticketOrderMapper, idempotencyService, fulfillmentService, new ObjectMapper(), auditTrailService);
 
         assertThatThrownBy(() -> service.confirmPayment("idem-key-002", request))
                 .isInstanceOf(BusinessException.class)
@@ -95,6 +111,7 @@ class PaymentConfirmationServiceTest {
 
         assertThat(fulfillmentService.createdRecord).isNull();
         assertThat(idempotencyService.markedResourceId).isNull();
+        verify(auditTrailService, never()).append(any(AuditTrailEvent.class));
     }
 
     @Test
@@ -110,18 +127,23 @@ class PaymentConfirmationServiceTest {
                 .build();
         RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(succeededRecord());
         idempotencyService.replayedResponse = cached;
+        AuditTrailService auditTrailService = mock(AuditTrailService.class);
         PaymentConfirmationService service = new PaymentConfirmationService(
                 ticketOrderMapperProxy(null, 0, new AtomicReference<>(), new AtomicReference<>(),
                         new AtomicReference<>(), new AtomicReference<>()),
                 idempotencyService,
                 new RecordingFulfillmentService(),
-                new ObjectMapper());
+                new ObjectMapper(),
+                auditTrailService);
 
         PaymentConfirmationResponse response = service.confirmPayment("idem-key-003", buildRequest());
 
         assertThat(response.getPaymentConfirmationStatus()).isEqualTo("REPLAYED");
         assertThat(response.getFulfillmentId()).isEqualTo("ful-existing-001");
         assertThat(idempotencyService.markedResourceId).isNull();
+        ArgumentCaptor<AuditTrailEvent> eventCaptor = ArgumentCaptor.forClass(AuditTrailEvent.class);
+        verify(auditTrailService).append(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().getEventType()).isEqualTo("PAYMENT_CONFIRMATION_REPLAYED");
     }
 
     @Test
@@ -132,8 +154,9 @@ class PaymentConfirmationServiceTest {
         RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(processingRecord());
         RecordingFulfillmentService fulfillmentService = new RecordingFulfillmentService();
         fulfillmentService.foundRecord = existingFulfillment();
+        AuditTrailService auditTrailService = mock(AuditTrailService.class);
         PaymentConfirmationService service = new PaymentConfirmationService(
-                ticketOrderMapper, idempotencyService, fulfillmentService, new ObjectMapper());
+                ticketOrderMapper, idempotencyService, fulfillmentService, new ObjectMapper(), auditTrailService);
 
         PaymentConfirmationResponse response = service.confirmPayment("idem-key-004", buildRequest());
 
@@ -141,6 +164,9 @@ class PaymentConfirmationServiceTest {
         assertThat(response.getFulfillmentId()).isEqualTo("ful-existing-001");
         assertThat(idempotencyService.markedResourceType).isEqualTo("FULFILLMENT");
         assertThat(idempotencyService.markedResourceId).isEqualTo("ful-existing-001");
+        ArgumentCaptor<AuditTrailEvent> eventCaptor = ArgumentCaptor.forClass(AuditTrailEvent.class);
+        verify(auditTrailService).append(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().getEventType()).isEqualTo("PAYMENT_CONFIRMATION_REPLAYED");
     }
 
     @Test
@@ -148,66 +174,100 @@ class PaymentConfirmationServiceTest {
         IdempotencyRecord inProgress = processingRecord();
         inProgress.setNewlyCreated(false);
         RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(inProgress);
+        AuditTrailService auditTrailService = mock(AuditTrailService.class);
         PaymentConfirmationService service = new PaymentConfirmationService(
                 ticketOrderMapperProxy(pendingOrder(), 1, new AtomicReference<>(), new AtomicReference<>(),
                         new AtomicReference<>(), new AtomicReference<>()),
                 idempotencyService,
                 new RecordingFulfillmentService(),
-                new ObjectMapper());
+                new ObjectMapper(),
+                auditTrailService);
 
         assertThatThrownBy(() -> service.confirmPayment("idem-key-005", buildRequest()))
                 .isInstanceOf(BusinessException.class)
                 .extracting(e -> ((BusinessException) e).getErrorCode())
                 .isEqualTo(ErrorCode.PAYMENT_CONFIRMATION_IN_PROGRESS);
+        verify(auditTrailService, never()).append(any(AuditTrailEvent.class));
     }
 
     @Test
     void confirmPayment_orderNotFound_returnsBusinessException() {
         RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(processingRecord());
+        AuditTrailService auditTrailService = mock(AuditTrailService.class);
         PaymentConfirmationService service = new PaymentConfirmationService(
                 ticketOrderMapperProxy(null, 0, new AtomicReference<>(), new AtomicReference<>(),
                         new AtomicReference<>(), new AtomicReference<>()),
                 idempotencyService,
                 new RecordingFulfillmentService(),
-                new ObjectMapper());
+                new ObjectMapper(),
+                auditTrailService);
 
         assertThatThrownBy(() -> service.confirmPayment("idem-key-006", buildRequest()))
                 .isInstanceOf(BusinessException.class)
                 .extracting(e -> ((BusinessException) e).getErrorCode())
                 .isEqualTo(ErrorCode.ORDER_NOT_FOUND);
+        verify(auditTrailService, never()).append(any(AuditTrailEvent.class));
     }
 
     @Test
     void confirmPayment_orderClosed_returnsOrderNotConfirmable() {
         RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(processingRecord());
+        AuditTrailService auditTrailService = mock(AuditTrailService.class);
         PaymentConfirmationService service = new PaymentConfirmationService(
                 ticketOrderMapperProxy(closedOrder(), 0, new AtomicReference<>(), new AtomicReference<>(),
                         new AtomicReference<>(), new AtomicReference<>()),
                 idempotencyService,
                 new RecordingFulfillmentService(),
-                new ObjectMapper());
+                new ObjectMapper(),
+                auditTrailService);
 
         assertThatThrownBy(() -> service.confirmPayment("idem-key-007", buildRequest()))
                 .isInstanceOf(BusinessException.class)
                 .extracting(e -> ((BusinessException) e).getErrorCode())
                 .isEqualTo(ErrorCode.ORDER_NOT_CONFIRMABLE);
+        verify(auditTrailService, never()).append(any(AuditTrailEvent.class));
     }
 
     @Test
     void confirmPayment_confirmedOrderWithoutFulfillment_returnsInvariantBroken() {
         RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(processingRecord());
         RecordingFulfillmentService fulfillmentService = new RecordingFulfillmentService();
+        AuditTrailService auditTrailService = mock(AuditTrailService.class);
         PaymentConfirmationService service = new PaymentConfirmationService(
                 ticketOrderMapperProxy(confirmedOrder(), 0, new AtomicReference<>(), new AtomicReference<>(),
                         new AtomicReference<>(), new AtomicReference<>()),
                 idempotencyService,
                 fulfillmentService,
-                new ObjectMapper());
+                new ObjectMapper(),
+                auditTrailService);
 
         assertThatThrownBy(() -> service.confirmPayment("idem-key-008", buildRequest()))
                 .isInstanceOf(BusinessException.class)
                 .extracting(e -> ((BusinessException) e).getErrorCode())
                 .isEqualTo(ErrorCode.FULFILLMENT_INVARIANT_BROKEN);
+        verify(auditTrailService, never()).append(any(AuditTrailEvent.class));
+    }
+
+    @Test
+    void confirmPayment_auditAppendFails_propagatesExceptionAndDoesNotMarkSucceeded() {
+        PaymentConfirmationRequest request = buildRequest();
+        TicketOrder order = pendingOrder();
+        TicketOrderMapper ticketOrderMapper = ticketOrderMapperProxy(
+                order, 1, new AtomicReference<>(), new AtomicReference<>(),
+                new AtomicReference<>(), new AtomicReference<>());
+        RecordingIdempotencyService idempotencyService = new RecordingIdempotencyService(processingRecord());
+        RecordingFulfillmentService fulfillmentService = new RecordingFulfillmentService();
+        AuditTrailService auditTrailService = mock(AuditTrailService.class);
+        doThrow(new IllegalStateException("audit append failed"))
+                .when(auditTrailService).append(any(AuditTrailEvent.class));
+        PaymentConfirmationService service = new PaymentConfirmationService(
+                ticketOrderMapper, idempotencyService, fulfillmentService, new ObjectMapper(), auditTrailService);
+
+        assertThatThrownBy(() -> service.confirmPayment("idem-key-009", request))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("audit append failed");
+
+        assertThat(idempotencyService.markedResourceId).isNull();
     }
 
     private PaymentConfirmationRequest buildRequest() {

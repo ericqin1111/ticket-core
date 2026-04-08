@@ -2,6 +2,8 @@ package com.ticket.core.reservation.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ticket.core.audit.entity.AuditTrailEvent;
+import com.ticket.core.audit.service.AuditTrailService;
 import com.ticket.core.catalog.entity.CatalogItem;
 import com.ticket.core.catalog.service.CatalogService;
 import com.ticket.core.idempotency.entity.IdempotencyRecord;
@@ -19,6 +21,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -40,6 +44,7 @@ public class ReservationService {
     private final InventoryService inventoryService;
     private final IdempotencyService idempotencyService;
     private final ObjectMapper objectMapper;
+    private final AuditTrailService auditTrailService;
 
     @Transactional
     public CreateReservationResponse createReservation(String idempotencyKey, CreateReservationRequest request) {
@@ -79,6 +84,7 @@ public class ReservationService {
         reservationRecordMapper.insert(record);
         log.info("Reservation created: reservationId={}, externalTradeNo={}",
                 reservationId, request.getExternalTradeNo());
+        auditTrailService.append(buildReservationCreatedEvent(record, idempotencyKey, now));
 
         CreateReservationResponse response = CreateReservationResponse.builder()
                 .reservationId(reservationId)
@@ -102,5 +108,31 @@ public class ReservationService {
             log.error("Failed to serialize object to JSON", e);
             throw new IllegalStateException("JSON serialization failed", e);
         }
+    }
+
+    private AuditTrailEvent buildReservationCreatedEvent(ReservationRecord record, String idempotencyKey,
+                                                         LocalDateTime occurredAt) {
+        AuditTrailEvent event = new AuditTrailEvent();
+        event.setEventId(UUID.randomUUID().toString());
+        event.setEventType("RESERVATION_CREATED");
+        event.setAggregateType("RESERVATION");
+        event.setAggregateId(record.getReservationId());
+        event.setExternalTradeNo(record.getExternalTradeNo());
+        event.setReservationId(record.getReservationId());
+        event.setInventoryResourceId(record.getInventoryResourceId());
+        event.setActorType("CHANNEL");
+        event.setIdempotencyKey(idempotencyKey);
+        event.setReasonCode("NOT_APPLICABLE");
+        event.setPayloadSummaryJson(toJson(buildReservationPayloadSummary(record)));
+        event.setOccurredAt(occurredAt);
+        return event;
+    }
+
+    private Map<String, Object> buildReservationPayloadSummary(ReservationRecord record) {
+        Map<String, Object> payloadSummary = new LinkedHashMap<>();
+        payloadSummary.put("catalog_item_id", record.getCatalogItemId());
+        payloadSummary.put("quantity", record.getQuantity());
+        payloadSummary.put("status", record.getStatus());
+        return payloadSummary;
     }
 }

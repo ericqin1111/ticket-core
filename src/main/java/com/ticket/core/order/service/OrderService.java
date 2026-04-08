@@ -2,6 +2,8 @@ package com.ticket.core.order.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ticket.core.audit.entity.AuditTrailEvent;
+import com.ticket.core.audit.service.AuditTrailService;
 import com.ticket.core.common.exception.BusinessException;
 import com.ticket.core.common.exception.ErrorCode;
 import com.ticket.core.idempotency.entity.IdempotencyRecord;
@@ -20,6 +22,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -45,6 +49,7 @@ public class OrderService {
     private final ReservationRecordMapper reservationRecordMapper;
     private final IdempotencyService idempotencyService;
     private final ObjectMapper objectMapper;
+    private final AuditTrailService auditTrailService;
 
     @Transactional
     public CreateOrderResponse createOrder(String idempotencyKey, CreateOrderRequest request) {
@@ -105,6 +110,8 @@ public class OrderService {
         }
         ticketOrderMapper.insert(order);
         log.info("Order created: orderId={}, externalTradeNo={}", orderId, request.getExternalTradeNo());
+        auditTrailService.append(buildReservationConsumedEvent(reservation, request.getExternalTradeNo(), idempotencyKey, now));
+        auditTrailService.append(buildOrderCreatedEvent(order, idempotencyKey, now));
 
         CreateOrderResponse response = CreateOrderResponse.builder()
                 .orderId(orderId)
@@ -126,5 +133,56 @@ public class OrderService {
             log.error("Failed to serialize object to JSON", e);
             throw new IllegalStateException("JSON serialization failed", e);
         }
+    }
+
+    private AuditTrailEvent buildReservationConsumedEvent(ReservationRecord reservation, String externalTradeNo,
+                                                          String idempotencyKey, LocalDateTime occurredAt) {
+        AuditTrailEvent event = new AuditTrailEvent();
+        event.setEventId(UUID.randomUUID().toString());
+        event.setEventType("RESERVATION_CONSUMED");
+        event.setAggregateType("RESERVATION");
+        event.setAggregateId(reservation.getReservationId());
+        event.setExternalTradeNo(externalTradeNo);
+        event.setOrderId(reservation.getConsumedOrderId());
+        event.setReservationId(reservation.getReservationId());
+        event.setInventoryResourceId(reservation.getInventoryResourceId());
+        event.setActorType("CHANNEL");
+        event.setIdempotencyKey(idempotencyKey);
+        event.setReasonCode("NOT_APPLICABLE");
+        event.setPayloadSummaryJson(toJson(buildReservationConsumedPayloadSummary(reservation)));
+        event.setOccurredAt(occurredAt);
+        return event;
+    }
+
+    private AuditTrailEvent buildOrderCreatedEvent(TicketOrder order, String idempotencyKey, LocalDateTime occurredAt) {
+        AuditTrailEvent event = new AuditTrailEvent();
+        event.setEventId(UUID.randomUUID().toString());
+        event.setEventType("ORDER_CREATED");
+        event.setAggregateType("ORDER");
+        event.setAggregateId(order.getOrderId());
+        event.setExternalTradeNo(order.getExternalTradeNo());
+        event.setOrderId(order.getOrderId());
+        event.setReservationId(order.getReservationId());
+        event.setActorType("CHANNEL");
+        event.setIdempotencyKey(idempotencyKey);
+        event.setReasonCode("NOT_APPLICABLE");
+        event.setPayloadSummaryJson(toJson(buildOrderCreatedPayloadSummary(order)));
+        event.setOccurredAt(occurredAt);
+        return event;
+    }
+
+    private Map<String, Object> buildReservationConsumedPayloadSummary(ReservationRecord reservation) {
+        Map<String, Object> payloadSummary = new LinkedHashMap<>();
+        payloadSummary.put("quantity", reservation.getQuantity());
+        payloadSummary.put("status", reservation.getStatus());
+        return payloadSummary;
+    }
+
+    private Map<String, Object> buildOrderCreatedPayloadSummary(TicketOrder order) {
+        Map<String, Object> payloadSummary = new LinkedHashMap<>();
+        payloadSummary.put("status", order.getStatus());
+        payloadSummary.put("buyer_ref", order.getBuyerRef());
+        payloadSummary.put("payment_deadline_at", order.getPaymentDeadlineAt().atOffset(ZoneOffset.UTC).toString());
+        return payloadSummary;
     }
 }

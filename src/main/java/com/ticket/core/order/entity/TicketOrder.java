@@ -24,6 +24,7 @@ public class TicketOrder {
     private String submissionContextJson;
     private LocalDateTime paymentDeadlineAt;
     private LocalDateTime confirmedAt;
+    private LocalDateTime closedAt;
     @Version
     private Long version;
     private LocalDateTime createdAt;

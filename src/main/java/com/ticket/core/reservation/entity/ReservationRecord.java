@@ -23,6 +23,7 @@ public class ReservationRecord {
     private LocalDateTime expiresAt;
     private String consumedOrderId;
     private LocalDateTime consumedAt;
+    private LocalDateTime releasedAt;
     private String channelContextJson;
     @Version
     private Long version;

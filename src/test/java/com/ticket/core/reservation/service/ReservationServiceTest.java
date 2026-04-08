@@ -1,6 +1,8 @@
 package com.ticket.core.reservation.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ticket.core.audit.entity.AuditTrailEvent;
+import com.ticket.core.audit.service.AuditTrailService;
 import com.ticket.core.catalog.entity.CatalogItem;
 import com.ticket.core.catalog.service.CatalogService;
 import com.ticket.core.common.exception.BusinessException;
@@ -15,6 +17,7 @@ import com.ticket.core.reservation.entity.ReservationRecord;
 import com.ticket.core.reservation.mapper.ReservationRecordMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -32,6 +35,7 @@ class ReservationServiceTest {
     @Mock private InventoryService inventoryService;
     @Mock private IdempotencyService idempotencyService;
     @Mock private ObjectMapper objectMapper;
+    @Mock private AuditTrailService auditTrailService;
 
     @InjectMocks
     private ReservationService reservationService;
@@ -97,8 +101,13 @@ class ReservationServiceTest {
         assertThat(response.getReservationId()).isNotBlank();
         assertThat(response.getExpiresAt()).isNotNull();
 
+        ArgumentCaptor<AuditTrailEvent> eventCaptor = ArgumentCaptor.forClass(AuditTrailEvent.class);
         verify(reservationRecordMapper).insert(any(ReservationRecord.class));
+        verify(auditTrailService).append(eventCaptor.capture());
         verify(idempotencyService).markSucceeded(eq("idem-record-id-001"), eq("RESERVATION"), anyString(), any(CreateReservationResponse.class));
+        assertThat(eventCaptor.getValue().getEventType()).isEqualTo("RESERVATION_CREATED");
+        assertThat(eventCaptor.getValue().getAggregateType()).isEqualTo("RESERVATION");
+        assertThat(eventCaptor.getValue().getExternalTradeNo()).isEqualTo(EXTERNAL_TRADE_NO);
     }
 
     @Test
@@ -142,5 +151,26 @@ class ReservationServiceTest {
         assertThat(response.getReservationId()).isEqualTo("cached-id");
         verify(catalogService, never()).validateAndGetActiveItem(anyString());
         verify(reservationRecordMapper, never()).insert(any(ReservationRecord.class));
+        verify(auditTrailService, never()).append(any(AuditTrailEvent.class));
+    }
+
+    @Test
+    void createReservation_auditAppendFails_propagatesExceptionAndDoesNotMarkSuccess() {
+        CreateReservationRequest request = buildRequest();
+        when(idempotencyService.hashRequest(request)).thenReturn("hash-004");
+        when(idempotencyService.checkAndMarkProcessing(ACTION_NAME, IDEMPOTENCY_KEY, "hash-004", EXTERNAL_TRADE_NO))
+                .thenReturn(processingRecord());
+        when(catalogService.validateAndGetActiveItem(CATALOG_ITEM_ID)).thenReturn(activeCatalogItem());
+        when(inventoryService.getActiveInventory(INVENTORY_RESOURCE_ID)).thenReturn(activeInventory());
+        doNothing().when(inventoryService).lockQuantity(any(InventoryResource.class), eq(2));
+        when(reservationRecordMapper.insert(any(ReservationRecord.class))).thenReturn(1);
+        doThrow(new IllegalStateException("audit append failed"))
+                .when(auditTrailService).append(any(AuditTrailEvent.class));
+
+        assertThatThrownBy(() -> reservationService.createReservation(IDEMPOTENCY_KEY, request))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("audit append failed");
+
+        verify(idempotencyService, never()).markSucceeded(anyString(), anyString(), anyString(), any());
     }
 }

@@ -28,4 +28,16 @@ public interface InventoryResourceMapper extends BaseMapper<InventoryResource> {
     int lockInventory(@Param("inventoryResourceId") String inventoryResourceId,
                       @Param("quantity") int quantity,
                       @Param("version") long version);
+
+    @Update("UPDATE inventory_resource " +
+            "SET reserved_quantity = reserved_quantity - #{quantity}, " +
+            "    version = version + 1, " +
+            "    updated_at = NOW(3) " +
+            "WHERE inventory_resource_id = #{inventoryResourceId} " +
+            "  AND status = 'ACTIVE' " +
+            "  AND version = #{version} " +
+            "  AND reserved_quantity >= #{quantity}")
+    int restoreInventory(@Param("inventoryResourceId") String inventoryResourceId,
+                         @Param("quantity") int quantity,
+                         @Param("version") long version);
 }
