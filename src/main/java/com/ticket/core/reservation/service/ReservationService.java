@@ -6,6 +6,8 @@ import com.ticket.core.audit.entity.AuditTrailEvent;
 import com.ticket.core.audit.service.AuditTrailService;
 import com.ticket.core.catalog.entity.CatalogItem;
 import com.ticket.core.catalog.service.CatalogService;
+import com.ticket.core.common.exception.BusinessException;
+import com.ticket.core.common.exception.ErrorCode;
 import com.ticket.core.idempotency.entity.IdempotencyRecord;
 import com.ticket.core.idempotency.service.IdempotencyService;
 import com.ticket.core.inventory.entity.InventoryResource;

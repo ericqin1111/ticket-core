@@ -3,6 +3,8 @@ package com.ticket.core.integration;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.ticket.core.catalog.entity.CatalogItem;
 import com.ticket.core.catalog.mapper.CatalogItemMapper;
+import com.ticket.core.audit.entity.AuditTrailEvent;
+import com.ticket.core.audit.mapper.AuditTrailEventMapper;
 import com.ticket.core.fulfillment.entity.FulfillmentRecord;
 import com.ticket.core.fulfillment.mapper.FulfillmentRecordMapper;
 import com.ticket.core.idempotency.entity.IdempotencyRecord;
@@ -11,6 +13,7 @@ import com.ticket.core.inventory.entity.InventoryResource;
 import com.ticket.core.inventory.mapper.InventoryResourceMapper;
 import com.ticket.core.order.entity.TicketOrder;
 import com.ticket.core.order.mapper.TicketOrderMapper;
+import com.ticket.core.order.service.OrderTimeoutSweepScheduler;
 import com.ticket.core.reservation.entity.ReservationRecord;
 import com.ticket.core.reservation.mapper.ReservationRecordMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,9 +56,13 @@ public abstract class AbstractIntegrationTest {
     @Autowired
     protected TicketOrderMapper ticketOrderMapper;
     @Autowired
+    protected AuditTrailEventMapper auditTrailEventMapper;
+    @Autowired
     protected FulfillmentRecordMapper fulfillmentRecordMapper;
     @Autowired
     protected IdempotencyRecordMapper idempotencyRecordMapper;
+    @Autowired
+    protected OrderTimeoutSweepScheduler orderTimeoutSweepScheduler;
 
     /**
      * Truncate all domain tables before each test to guarantee isolation.
@@ -63,6 +70,7 @@ public abstract class AbstractIntegrationTest {
      */
     @BeforeEach
     void truncateAllTables() {
+        auditTrailEventMapper.delete(new LambdaQueryWrapper<AuditTrailEvent>().isNotNull(AuditTrailEvent::getEventId));
         fulfillmentRecordMapper.delete(new LambdaQueryWrapper<FulfillmentRecord>().isNotNull(FulfillmentRecord::getFulfillmentId));
         ticketOrderMapper.delete(new LambdaQueryWrapper<TicketOrder>().isNotNull(TicketOrder::getOrderId));
         reservationRecordMapper.delete(new LambdaQueryWrapper<ReservationRecord>().isNotNull(ReservationRecord::getReservationId));

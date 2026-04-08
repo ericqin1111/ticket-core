@@ -70,6 +70,10 @@ public class PaymentConfirmationService {
         if ("CONFIRMED".equals(order.getStatus())) {
             return replayConfirmedOrder(order, idemRecord, request, idempotencyKey);
         }
+        if ("CLOSED".equals(order.getStatus())) {
+            auditTrailService.append(buildPaymentConfirmationRejectedEvent(order, request, idempotencyKey));
+            throw new BusinessException(ErrorCode.ORDER_NOT_CONFIRMABLE);
+        }
         if (!"PENDING_PAYMENT".equals(order.getStatus())) {
             throw new BusinessException(ErrorCode.ORDER_NOT_CONFIRMABLE);
         }
@@ -166,6 +170,9 @@ public class PaymentConfirmationService {
         if ("PENDING_PAYMENT".equals(latestOrder.getStatus())) {
             throw new BusinessException(ErrorCode.PAYMENT_CONFIRMATION_IN_PROGRESS);
         }
+        if ("CLOSED".equals(latestOrder.getStatus())) {
+            auditTrailService.append(buildPaymentConfirmationRejectedEvent(latestOrder, request, idempotencyKey));
+        }
         throw new BusinessException(ErrorCode.ORDER_NOT_CONFIRMABLE);
     }
 
@@ -253,6 +260,25 @@ public class PaymentConfirmationService {
         event.setReasonCode(reasonCode);
         event.setPayloadSummaryJson(toJson(buildPaymentPayloadSummary(request, reasonCode)));
         event.setOccurredAt(toLocalDateTime(occurredAt));
+        return event;
+    }
+
+    private AuditTrailEvent buildPaymentConfirmationRejectedEvent(TicketOrder order,
+                                                                  PaymentConfirmationRequest request,
+                                                                  String idempotencyKey) {
+        AuditTrailEvent event = new AuditTrailEvent();
+        event.setEventId(UUID.randomUUID().toString());
+        event.setEventType("PAYMENT_CONFIRMATION_REJECTED");
+        event.setAggregateType("PAYMENT_CONFIRMATION");
+        event.setAggregateId(request.getProviderEventId());
+        event.setExternalTradeNo(request.getExternalTradeNo());
+        event.setOrderId(order.getOrderId());
+        event.setProviderEventId(request.getProviderEventId());
+        event.setActorType("CHANNEL");
+        event.setIdempotencyKey(idempotencyKey);
+        event.setReasonCode("CLOSED_BY_TIMEOUT");
+        event.setPayloadSummaryJson(toJson(buildPaymentPayloadSummary(request, "REJECTED")));
+        event.setOccurredAt(toLocalDateTime(request.getConfirmedAt()));
         return event;
     }
 

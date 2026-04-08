@@ -3,6 +3,7 @@ package com.ticket.core.integration;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ticket.core.audit.entity.AuditTrailEvent;
 import com.ticket.core.common.dto.ErrorResponse;
 import com.ticket.core.fulfillment.entity.FulfillmentRecord;
 import com.ticket.core.order.entity.TicketOrder;
@@ -143,6 +144,13 @@ class PaymentConfirmationApiIT extends AbstractIntegrationTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().getCode()).isEqualTo("ORDER_NOT_CONFIRMABLE");
+
+        AuditTrailEvent auditEvent = auditTrailEventMapper.selectOne(
+                new LambdaQueryWrapper<AuditTrailEvent>()
+                        .eq(AuditTrailEvent::getEventType, "PAYMENT_CONFIRMATION_REJECTED")
+                        .eq(AuditTrailEvent::getOrderId, "order-pay-closed-001"));
+        assertThat(auditEvent).isNotNull();
+        assertThat(auditEvent.getReasonCode()).isEqualTo("CLOSED_BY_TIMEOUT");
     }
 
     @Test

@@ -1,7 +1,10 @@
 package com.ticket.core.integration;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.ticket.core.audit.entity.AuditTrailEvent;
 import com.ticket.core.common.dto.ErrorResponse;
 import com.ticket.core.order.dto.CreateOrderResponse;
+import com.ticket.core.order.entity.TicketOrder;
 import com.ticket.core.reservation.entity.ReservationRecord;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -356,5 +359,44 @@ class OrderApiIT extends AbstractIntegrationTest {
         ReservationRecord reservation = reservationRecordMapper.selectById("res-race-001");
         assertThat(reservation.getStatus()).isEqualTo("CONSUMED");
         assertThat(reservation.getConsumedOrderId()).isNotBlank();
+    }
+
+    @Test
+    @DisplayName("Internal timeout sweep closes overdue PENDING_PAYMENT order and releases reservation plus inventory")
+    void timeoutSweep_overdueOrder_closesAndReleasesResources() {
+        seedCatalogAndInventory();
+        insertReservation("res-timeout-it-001", "trade-timeout-it-001", CATALOG_ID, INV_ID, 1,
+                "CONSUMED", LocalDateTime.now().plusMinutes(10));
+        ReservationRecord reservation = reservationRecordMapper.selectById("res-timeout-it-001");
+        reservation.setConsumedOrderId("order-timeout-it-001");
+        reservation.setConsumedAt(LocalDateTime.now().minusMinutes(20));
+        reservationRecordMapper.updateById(reservation);
+
+        TicketOrder order = new TicketOrder();
+        order.setOrderId("order-timeout-it-001");
+        order.setExternalTradeNo("trade-timeout-it-001");
+        order.setReservationId("res-timeout-it-001");
+        order.setStatus("PENDING_PAYMENT");
+        order.setBuyerRef("buyer-timeout");
+        order.setPaymentDeadlineAt(LocalDateTime.now().minusMinutes(5));
+        order.setVersion(0L);
+        ticketOrderMapper.insert(order);
+
+        orderTimeoutSweepScheduler.sweepOnce();
+
+        TicketOrder reloadedOrder = ticketOrderMapper.selectById("order-timeout-it-001");
+        ReservationRecord reloadedReservation = reservationRecordMapper.selectById("res-timeout-it-001");
+        assertThat(reloadedOrder.getStatus()).isEqualTo("CLOSED");
+        assertThat(reloadedOrder.getClosedAt()).isNotNull();
+        assertThat(reloadedReservation.getStatus()).isEqualTo("EXPIRED");
+        assertThat(reloadedReservation.getReleasedAt()).isNotNull();
+        assertThat(inventoryResourceMapper.selectById(INV_ID).getReservedQuantity()).isEqualTo(0);
+
+        Long timeoutAuditCount = auditTrailEventMapper.selectCount(
+                new LambdaQueryWrapper<AuditTrailEvent>()
+                        .eq(AuditTrailEvent::getOrderId, "order-timeout-it-001")
+                        .in(AuditTrailEvent::getEventType,
+                                "ORDER_TIMEOUT_CLOSED", "RESERVATION_RELEASED", "INVENTORY_RESTORED"));
+        assertThat(timeoutAuditCount).isEqualTo(3L);
     }
 }

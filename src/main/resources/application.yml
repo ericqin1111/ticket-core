@@ -24,3 +24,7 @@ server:
 ticket:
   order:
     payment-deadline-minutes: 30
+    timeout-sweep:
+      enabled: true
+      fixed-delay-ms: 30000
+      batch-size: 200

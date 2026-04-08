@@ -225,7 +225,10 @@ class PaymentConfirmationServiceTest {
                 .isInstanceOf(BusinessException.class)
                 .extracting(e -> ((BusinessException) e).getErrorCode())
                 .isEqualTo(ErrorCode.ORDER_NOT_CONFIRMABLE);
-        verify(auditTrailService, never()).append(any(AuditTrailEvent.class));
+        ArgumentCaptor<AuditTrailEvent> eventCaptor = ArgumentCaptor.forClass(AuditTrailEvent.class);
+        verify(auditTrailService).append(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().getEventType()).isEqualTo("PAYMENT_CONFIRMATION_REJECTED");
+        assertThat(eventCaptor.getValue().getReasonCode()).isEqualTo("CLOSED_BY_TIMEOUT");
     }
 
     @Test
