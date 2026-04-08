@@ -80,6 +80,17 @@ class ReservationServiceTest {
         return inv;
     }
 
+    private ReservationRecord consumedReservation() {
+        ReservationRecord record = new ReservationRecord();
+        record.setReservationId("res-timeout-001");
+        record.setExternalTradeNo(EXTERNAL_TRADE_NO);
+        record.setInventoryResourceId(INVENTORY_RESOURCE_ID);
+        record.setQuantity(2);
+        record.setStatus("CONSUMED");
+        record.setVersion(4L);
+        return record;
+    }
+
     @Test
     void createReservation_happyPath_returnsActiveReservation() {
         CreateReservationRequest request = buildRequest();
@@ -172,5 +183,63 @@ class ReservationServiceTest {
                 .hasMessageContaining("audit append failed");
 
         verify(idempotencyService, never()).markSucceeded(anyString(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void releaseConsumedReservationForOrderTimeout_happyPath_restoresInventoryAndReturnsSummary() {
+        ReservationRecord reservation = consumedReservation();
+        when(reservationRecordMapper.selectById("res-timeout-001")).thenReturn(reservation);
+        when(reservationRecordMapper.releaseConsumedReservation("res-timeout-001",
+                java.time.LocalDateTime.of(2026, 4, 8, 10, 5), 4L)).thenReturn(1);
+        when(inventoryService.getActiveInventory(INVENTORY_RESOURCE_ID)).thenReturn(activeInventory());
+        doNothing().when(inventoryService).restoreQuantity(any(InventoryResource.class), eq(2));
+
+        ReservationService.TimeoutReleaseResult result =
+                reservationService.releaseConsumedReservationForOrderTimeout(
+                        "res-timeout-001",
+                        "order-timeout-001",
+                        EXTERNAL_TRADE_NO,
+                        java.time.LocalDateTime.of(2026, 4, 8, 10, 5));
+
+        assertThat(result.orderId()).isEqualTo("order-timeout-001");
+        assertThat(result.reservationId()).isEqualTo("res-timeout-001");
+        assertThat(result.inventoryResourceId()).isEqualTo(INVENTORY_RESOURCE_ID);
+        assertThat(result.quantity()).isEqualTo(2);
+        verify(inventoryService).restoreQuantity(any(InventoryResource.class), eq(2));
+    }
+
+    @Test
+    void releaseConsumedReservationForOrderTimeout_whenReservationStatusInvalid_throwsIllegalStateException() {
+        ReservationRecord reservation = consumedReservation();
+        reservation.setStatus("EXPIRED");
+        when(reservationRecordMapper.selectById("res-timeout-001")).thenReturn(reservation);
+
+        assertThatThrownBy(() -> reservationService.releaseConsumedReservationForOrderTimeout(
+                "res-timeout-001",
+                "order-timeout-001",
+                EXTERNAL_TRADE_NO,
+                java.time.LocalDateTime.of(2026, 4, 8, 10, 5)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Timeout release requires CONSUMED reservation");
+
+        verify(inventoryService, never()).restoreQuantity(any(InventoryResource.class), anyInt());
+    }
+
+    @Test
+    void releaseConsumedReservationForOrderTimeout_whenReleaseUpdateFails_throwsIllegalStateException() {
+        ReservationRecord reservation = consumedReservation();
+        when(reservationRecordMapper.selectById("res-timeout-001")).thenReturn(reservation);
+        when(reservationRecordMapper.releaseConsumedReservation("res-timeout-001",
+                java.time.LocalDateTime.of(2026, 4, 8, 10, 5), 4L)).thenReturn(0);
+
+        assertThatThrownBy(() -> reservationService.releaseConsumedReservationForOrderTimeout(
+                "res-timeout-001",
+                "order-timeout-001",
+                EXTERNAL_TRADE_NO,
+                java.time.LocalDateTime.of(2026, 4, 8, 10, 5)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to release consumed reservation");
+
+        verify(inventoryService, never()).restoreQuantity(any(InventoryResource.class), anyInt());
     }
 }

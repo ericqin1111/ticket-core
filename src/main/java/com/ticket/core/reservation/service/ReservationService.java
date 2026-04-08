@@ -101,6 +101,36 @@ public class ReservationService {
         return response;
     }
 
+    public TimeoutReleaseResult releaseConsumedReservationForOrderTimeout(String reservationId,
+                                                                         String orderId,
+                                                                         String externalTradeNo,
+                                                                         LocalDateTime releasedAt) {
+        ReservationRecord reservation = reservationRecordMapper.selectById(reservationId);
+        if (reservation == null) {
+            throw new BusinessException(ErrorCode.RESERVATION_NOT_FOUND);
+        }
+        if (!"CONSUMED".equals(reservation.getStatus())) {
+            throw new IllegalStateException("Timeout release requires CONSUMED reservation: " + reservationId);
+        }
+
+        long currentVersion = reservation.getVersion() == null ? 0L : reservation.getVersion();
+        int released = reservationRecordMapper.releaseConsumedReservation(reservationId, releasedAt, currentVersion);
+        if (released == 0) {
+            throw new IllegalStateException("Failed to release consumed reservation: " + reservationId);
+        }
+
+        InventoryResource inventory = inventoryService.getActiveInventory(reservation.getInventoryResourceId());
+        inventoryService.restoreQuantity(inventory, reservation.getQuantity());
+
+        return new TimeoutReleaseResult(
+                orderId,
+                reservationId,
+                externalTradeNo,
+                reservation.getInventoryResourceId(),
+                reservation.getQuantity(),
+                releasedAt);
+    }
+
     private String toJson(Object obj) {
         try {
             return objectMapper.writeValueAsString(obj);
@@ -134,5 +164,14 @@ public class ReservationService {
         payloadSummary.put("quantity", record.getQuantity());
         payloadSummary.put("status", record.getStatus());
         return payloadSummary;
+    }
+
+    public record TimeoutReleaseResult(
+            String orderId,
+            String reservationId,
+            String externalTradeNo,
+            String inventoryResourceId,
+            Integer quantity,
+            LocalDateTime releasedAt) {
     }
 }

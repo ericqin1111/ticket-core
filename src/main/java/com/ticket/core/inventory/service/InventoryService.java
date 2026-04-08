@@ -44,4 +44,14 @@ public class InventoryService {
         }
         log.info("Inventory locked: inventoryResourceId={}, quantity={}", resource.getInventoryResourceId(), quantity);
     }
+
+    public void restoreQuantity(InventoryResource resource, int quantity) {
+        int affected = mapper.restoreInventory(resource.getInventoryResourceId(), quantity, resource.getVersion());
+        if (affected == 0) {
+            log.warn("Inventory restore failed (concurrent conflict or inconsistent reserved quantity): inventoryResourceId={}, quantity={}",
+                    resource.getInventoryResourceId(), quantity);
+            throw new IllegalStateException("Inventory restore failed for resource: " + resource.getInventoryResourceId());
+        }
+        log.info("Inventory restored: inventoryResourceId={}, quantity={}", resource.getInventoryResourceId(), quantity);
+    }
 }

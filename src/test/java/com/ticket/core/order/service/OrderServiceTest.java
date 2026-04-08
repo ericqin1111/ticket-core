@@ -14,6 +14,7 @@ import com.ticket.core.order.entity.TicketOrder;
 import com.ticket.core.order.mapper.TicketOrderMapper;
 import com.ticket.core.reservation.entity.ReservationRecord;
 import com.ticket.core.reservation.mapper.ReservationRecordMapper;
+import com.ticket.core.reservation.service.ReservationService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -38,6 +39,7 @@ class OrderServiceTest {
     @Mock private IdempotencyService idempotencyService;
     @Mock private ObjectMapper objectMapper;
     @Mock private AuditTrailService auditTrailService;
+    @Mock private ReservationService reservationService;
 
     @InjectMocks
     private OrderService orderService;
@@ -79,6 +81,17 @@ class OrderServiceTest {
         r.setQuantity(2);
         r.setVersion(0L);
         return r;
+    }
+
+    private TicketOrder overduePendingOrder() {
+        TicketOrder order = new TicketOrder();
+        order.setOrderId("order-timeout-001");
+        order.setExternalTradeNo(EXTERNAL_TRADE_NO);
+        order.setReservationId(RESERVATION_ID);
+        order.setStatus("PENDING_PAYMENT");
+        order.setPaymentDeadlineAt(LocalDateTime.of(2026, 4, 8, 10, 0));
+        order.setVersion(2L);
+        return order;
     }
 
     @Test
@@ -182,5 +195,84 @@ class OrderServiceTest {
                 .hasMessageContaining("audit append failed");
 
         verify(idempotencyService, never()).markSucceeded(anyString(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void timeoutCloseOrder_happyPath_closesOrderReleasesReservationAndAppendsAuditTrail() {
+        LocalDateTime now = LocalDateTime.of(2026, 4, 8, 10, 5);
+        TicketOrder overdueOrder = overduePendingOrder();
+        ReservationService.TimeoutReleaseResult releaseResult =
+                new ReservationService.TimeoutReleaseResult(
+                        overdueOrder.getOrderId(),
+                        RESERVATION_ID,
+                        EXTERNAL_TRADE_NO,
+                        "inv-001",
+                        2,
+                        now);
+
+        when(ticketOrderMapper.selectById(overdueOrder.getOrderId())).thenReturn(overdueOrder);
+        when(ticketOrderMapper.closePendingPayment(overdueOrder.getOrderId(), now, 2L)).thenReturn(1);
+        when(reservationService.releaseConsumedReservationForOrderTimeout(
+                RESERVATION_ID, overdueOrder.getOrderId(), EXTERNAL_TRADE_NO, now))
+                .thenReturn(releaseResult);
+
+        boolean applied = orderService.timeoutCloseOrder(overdueOrder.getOrderId(), now);
+
+        assertThat(applied).isTrue();
+        ArgumentCaptor<AuditTrailEvent> eventCaptor = ArgumentCaptor.forClass(AuditTrailEvent.class);
+        verify(auditTrailService, times(3)).append(eventCaptor.capture());
+        assertThat(eventCaptor.getAllValues()).extracting(AuditTrailEvent::getEventType)
+                .containsExactly("ORDER_TIMEOUT_CLOSED", "RESERVATION_RELEASED", "INVENTORY_RESTORED");
+    }
+
+    @Test
+    void timeoutCloseOrder_whenOrderAlreadyConfirmed_returnsFalseWithoutRelease() {
+        LocalDateTime now = LocalDateTime.of(2026, 4, 8, 10, 5);
+        TicketOrder confirmedOrder = overduePendingOrder();
+        confirmedOrder.setStatus("CONFIRMED");
+
+        when(ticketOrderMapper.selectById(confirmedOrder.getOrderId())).thenReturn(confirmedOrder);
+
+        boolean applied = orderService.timeoutCloseOrder(confirmedOrder.getOrderId(), now);
+
+        assertThat(applied).isFalse();
+        verify(ticketOrderMapper, never()).closePendingPayment(anyString(), any(LocalDateTime.class), anyLong());
+        verify(reservationService, never()).releaseConsumedReservationForOrderTimeout(anyString(), anyString(), anyString(), any(LocalDateTime.class));
+        verify(auditTrailService, never()).append(any(AuditTrailEvent.class));
+    }
+
+    @Test
+    void timeoutCloseOrder_whenConcurrentUpdateTurnsOrderClosed_returnsFalse() {
+        LocalDateTime now = LocalDateTime.of(2026, 4, 8, 10, 5);
+        TicketOrder overdueOrder = overduePendingOrder();
+        TicketOrder closedOrder = overduePendingOrder();
+        closedOrder.setStatus("CLOSED");
+
+        when(ticketOrderMapper.selectById(overdueOrder.getOrderId())).thenReturn(overdueOrder, closedOrder);
+        when(ticketOrderMapper.closePendingPayment(overdueOrder.getOrderId(), now, 2L)).thenReturn(0);
+
+        boolean applied = orderService.timeoutCloseOrder(overdueOrder.getOrderId(), now);
+
+        assertThat(applied).isFalse();
+        verify(reservationService, never()).releaseConsumedReservationForOrderTimeout(anyString(), anyString(), anyString(), any(LocalDateTime.class));
+        verify(auditTrailService, never()).append(any(AuditTrailEvent.class));
+    }
+
+    @Test
+    void timeoutCloseOrder_whenReservationReleaseFails_propagatesExceptionAndSkipsAudit() {
+        LocalDateTime now = LocalDateTime.of(2026, 4, 8, 10, 5);
+        TicketOrder overdueOrder = overduePendingOrder();
+
+        when(ticketOrderMapper.selectById(overdueOrder.getOrderId())).thenReturn(overdueOrder);
+        when(ticketOrderMapper.closePendingPayment(overdueOrder.getOrderId(), now, 2L)).thenReturn(1);
+        when(reservationService.releaseConsumedReservationForOrderTimeout(
+                RESERVATION_ID, overdueOrder.getOrderId(), EXTERNAL_TRADE_NO, now))
+                .thenThrow(new IllegalStateException("release failed"));
+
+        assertThatThrownBy(() -> orderService.timeoutCloseOrder(overdueOrder.getOrderId(), now))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("release failed");
+
+        verify(auditTrailService, never()).append(any(AuditTrailEvent.class));
     }
 }

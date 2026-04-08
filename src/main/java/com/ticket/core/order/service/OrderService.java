@@ -14,6 +14,7 @@ import com.ticket.core.order.entity.TicketOrder;
 import com.ticket.core.order.mapper.TicketOrderMapper;
 import com.ticket.core.reservation.entity.ReservationRecord;
 import com.ticket.core.reservation.mapper.ReservationRecordMapper;
+import com.ticket.core.reservation.service.ReservationService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,6 +23,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -50,6 +52,7 @@ public class OrderService {
     private final IdempotencyService idempotencyService;
     private final ObjectMapper objectMapper;
     private final AuditTrailService auditTrailService;
+    private final ReservationService reservationService;
 
     @Transactional
     public CreateOrderResponse createOrder(String idempotencyKey, CreateOrderRequest request) {
@@ -126,6 +129,46 @@ public class OrderService {
         return response;
     }
 
+    public List<TicketOrder> findOverduePendingPaymentOrders(LocalDateTime now, int limit) {
+        if (limit <= 0) {
+            throw new IllegalArgumentException("limit must be greater than zero");
+        }
+        return ticketOrderMapper.selectOverduePendingPaymentOrders(now, limit);
+    }
+
+    @Transactional
+    public boolean timeoutCloseOrder(String orderId, LocalDateTime now) {
+        TicketOrder order = ticketOrderMapper.selectById(orderId);
+        if (order == null) {
+            throw new IllegalStateException("Overdue order candidate not found: " + orderId);
+        }
+        if (!isClosableByTimeout(order, now)) {
+            log.info("Skip timeout close: orderId={}, status={}", orderId, order.getStatus());
+            return false;
+        }
+
+        long currentVersion = order.getVersion() == null ? 0L : order.getVersion();
+        int updated = ticketOrderMapper.closePendingPayment(orderId, now, currentVersion);
+        if (updated == 0) {
+            return resolveAfterConcurrentTimeoutCloseAttempt(orderId, now);
+        }
+
+        order.setStatus("CLOSED");
+        order.setClosedAt(now);
+        ReservationService.TimeoutReleaseResult releaseResult =
+                reservationService.releaseConsumedReservationForOrderTimeout(
+                        order.getReservationId(),
+                        order.getOrderId(),
+                        order.getExternalTradeNo(),
+                        now);
+
+        auditTrailService.append(buildOrderTimeoutClosedEvent(order, now));
+        auditTrailService.append(buildReservationReleasedEvent(releaseResult));
+        auditTrailService.append(buildInventoryRestoredEvent(releaseResult));
+        log.info("Timeout close applied: orderId={}, reservationId={}", orderId, order.getReservationId());
+        return true;
+    }
+
     private String toJson(Object obj) {
         try {
             return objectMapper.writeValueAsString(obj);
@@ -183,6 +226,103 @@ public class OrderService {
         payloadSummary.put("status", order.getStatus());
         payloadSummary.put("buyer_ref", order.getBuyerRef());
         payloadSummary.put("payment_deadline_at", order.getPaymentDeadlineAt().atOffset(ZoneOffset.UTC).toString());
+        return payloadSummary;
+    }
+
+    private boolean isClosableByTimeout(TicketOrder order, LocalDateTime now) {
+        if (!"PENDING_PAYMENT".equals(order.getStatus())) {
+            return false;
+        }
+        if (order.getPaymentDeadlineAt() == null) {
+            log.warn("Skip timeout close due to missing payment deadline: orderId={}", order.getOrderId());
+            return false;
+        }
+        return !order.getPaymentDeadlineAt().isAfter(now);
+    }
+
+    private boolean resolveAfterConcurrentTimeoutCloseAttempt(String orderId, LocalDateTime now) {
+        TicketOrder latestOrder = ticketOrderMapper.selectById(orderId);
+        if (latestOrder == null) {
+            throw new IllegalStateException("Overdue order candidate disappeared after close conflict: " + orderId);
+        }
+        if (!isClosableByTimeout(latestOrder, now)) {
+            log.info("Skip timeout close after concurrent update: orderId={}, status={}",
+                    orderId, latestOrder.getStatus());
+            return false;
+        }
+        log.warn("Timeout close lost concurrent update race while order remains overdue: orderId={}", orderId);
+        return false;
+    }
+
+    private AuditTrailEvent buildOrderTimeoutClosedEvent(TicketOrder order, LocalDateTime occurredAt) {
+        AuditTrailEvent event = new AuditTrailEvent();
+        event.setEventId(UUID.randomUUID().toString());
+        event.setEventType("ORDER_TIMEOUT_CLOSED");
+        event.setAggregateType("ORDER");
+        event.setAggregateId(order.getOrderId());
+        event.setExternalTradeNo(order.getExternalTradeNo());
+        event.setOrderId(order.getOrderId());
+        event.setReservationId(order.getReservationId());
+        event.setActorType("SYSTEM");
+        event.setReasonCode("ORDER_PAYMENT_TIMEOUT");
+        event.setPayloadSummaryJson(toJson(buildOrderTimeoutPayloadSummary(order)));
+        event.setOccurredAt(occurredAt);
+        return event;
+    }
+
+    private AuditTrailEvent buildReservationReleasedEvent(ReservationService.TimeoutReleaseResult releaseResult) {
+        AuditTrailEvent event = new AuditTrailEvent();
+        event.setEventId(UUID.randomUUID().toString());
+        event.setEventType("RESERVATION_RELEASED");
+        event.setAggregateType("RESERVATION");
+        event.setAggregateId(releaseResult.reservationId());
+        event.setExternalTradeNo(releaseResult.externalTradeNo());
+        event.setOrderId(releaseResult.orderId());
+        event.setReservationId(releaseResult.reservationId());
+        event.setInventoryResourceId(releaseResult.inventoryResourceId());
+        event.setActorType("SYSTEM");
+        event.setReasonCode("ORDER_PAYMENT_TIMEOUT");
+        event.setPayloadSummaryJson(toJson(buildReservationReleasedPayloadSummary(releaseResult)));
+        event.setOccurredAt(releaseResult.releasedAt());
+        return event;
+    }
+
+    private AuditTrailEvent buildInventoryRestoredEvent(ReservationService.TimeoutReleaseResult releaseResult) {
+        AuditTrailEvent event = new AuditTrailEvent();
+        event.setEventId(UUID.randomUUID().toString());
+        event.setEventType("INVENTORY_RESTORED");
+        event.setAggregateType("INVENTORY_RESOURCE");
+        event.setAggregateId(releaseResult.inventoryResourceId());
+        event.setExternalTradeNo(releaseResult.externalTradeNo());
+        event.setOrderId(releaseResult.orderId());
+        event.setReservationId(releaseResult.reservationId());
+        event.setInventoryResourceId(releaseResult.inventoryResourceId());
+        event.setActorType("SYSTEM");
+        event.setReasonCode("ORDER_PAYMENT_TIMEOUT");
+        event.setPayloadSummaryJson(toJson(buildInventoryRestoredPayloadSummary(releaseResult)));
+        event.setOccurredAt(releaseResult.releasedAt());
+        return event;
+    }
+
+    private Map<String, Object> buildOrderTimeoutPayloadSummary(TicketOrder order) {
+        Map<String, Object> payloadSummary = new LinkedHashMap<>();
+        payloadSummary.put("status", order.getStatus());
+        payloadSummary.put("payment_deadline_at", order.getPaymentDeadlineAt().atOffset(ZoneOffset.UTC).toString());
+        payloadSummary.put("closed_at", order.getClosedAt().atOffset(ZoneOffset.UTC).toString());
+        return payloadSummary;
+    }
+
+    private Map<String, Object> buildReservationReleasedPayloadSummary(ReservationService.TimeoutReleaseResult releaseResult) {
+        Map<String, Object> payloadSummary = new LinkedHashMap<>();
+        payloadSummary.put("quantity", releaseResult.quantity());
+        payloadSummary.put("released_at", releaseResult.releasedAt().atOffset(ZoneOffset.UTC).toString());
+        return payloadSummary;
+    }
+
+    private Map<String, Object> buildInventoryRestoredPayloadSummary(ReservationService.TimeoutReleaseResult releaseResult) {
+        Map<String, Object> payloadSummary = new LinkedHashMap<>();
+        payloadSummary.put("quantity", releaseResult.quantity());
+        payloadSummary.put("inventory_resource_id", releaseResult.inventoryResourceId());
         return payloadSummary;
     }
 }
