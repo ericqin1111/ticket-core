@@ -314,10 +314,18 @@ class PaymentConfirmationApiIT extends AbstractIntegrationTest {
         assertThat(response.getStatusCode().value()).isIn(200, 409);
         JsonNode json = objectMapper.readTree(response.getBody());
         if (response.getStatusCode().is2xxSuccessful()) {
-            assertThat(json.path("paymentConfirmationStatus").asText()).isIn("APPLIED", "REPLAYED");
+            assertThat(readPaymentConfirmationStatus(json)).isIn("APPLIED", "REPLAYED");
             return;
         }
         assertThat(json.path("code").asText()).isEqualTo("PAYMENT_CONFIRMATION_IN_PROGRESS");
         assertThat(json.path("retryable").asBoolean()).isTrue();
+    }
+
+    private String readPaymentConfirmationStatus(JsonNode json) {
+        String snakeCaseStatus = json.path("payment_confirmation_status").asText();
+        if (!snakeCaseStatus.isBlank()) {
+            return snakeCaseStatus;
+        }
+        return json.path("paymentConfirmationStatus").asText();
     }
 }
