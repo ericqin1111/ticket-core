@@ -1,6 +1,6 @@
 # API Catalog — Global Registry
 # Maintained by: governance-agent
-# Last updated by: RFC-TKT001-01
+# Last updated by: RFC-TKT001-02
 # Format: each endpoint is one entry under its owning module.
 
 catalog:
@@ -96,10 +96,47 @@ order:
       - RESERVATION_EXPIRED            # 410 — reservation status is EXPIRED or expires_at passed
       - IDEMPOTENCY_CONFLICT           # 409 — same key, different request payload
 
+payment:
+  - id: "POST /payments/confirmations"
+    method: POST
+    path: "/payments/confirmations"
+    introduced_by: "RFC-TKT001-02"
+    description: "接收支付渠道异步确认，原子推进 Order.CONFIRMED 并创建单个 Fulfillment.PENDING。"
+    required_headers:
+      - name: "Idempotency-Key"
+        type: string
+        description: "Payment Confirmation 动作级幂等键，不与其他 POST 接口共享幂等空间"
+    request_body:
+      schema: "payment-confirmation-request"
+      required: [external_trade_no, payment_provider, provider_event_id, confirmed_at]
+      fields:
+        external_trade_no: { type: string, minLength: 1 }
+        payment_provider: { type: string, minLength: 1 }
+        provider_event_id: { type: string, minLength: 1 }
+        provider_payment_id: { type: string, optional: true }
+        confirmed_at: { type: string, format: date-time }
+        channel_context: { type: object, additionalProperties: { type: string }, optional: true }
+    response_200:
+      schema: "payment-confirmation-response"
+      fields:
+        order_id: { type: string }
+        external_trade_no: { type: string }
+        order_status: { type: string, enum: [CONFIRMED] }
+        fulfillment_id: { type: string }
+        fulfillment_status: { type: string, enum: [PENDING] }
+        payment_confirmation_status: { type: string, enum: [APPLIED, REPLAYED] }
+        confirmed_at: { type: string, format: date-time }
+    error_codes:
+      - ORDER_NOT_FOUND                    # 404 — external_trade_no does not resolve to an order
+      - ORDER_NOT_CONFIRMABLE             # 409 — order state is CLOSED or otherwise not confirmable
+      - PAYMENT_CONFIRMATION_IN_PROGRESS  # 409 — concurrent confirmation is already processing, retryable=true
+      - FULFILLMENT_INVARIANT_BROKEN      # 409 — CONFIRMED order has no stable fulfillment projection
+      - IDEMPOTENCY_CONFLICT              # 409 — same key, different request payload
+
 shared_error_schema:
   schema: "error-response"
   fields:
-    code: { type: string, enum: [CATALOG_ITEM_NOT_SELLABLE, INSUFFICIENT_INVENTORY, RESERVATION_NOT_FOUND, RESERVATION_ALREADY_CONSUMED, RESERVATION_EXPIRED, IDEMPOTENCY_CONFLICT] }
+    code: { type: string, enum: [CATALOG_ITEM_NOT_SELLABLE, INSUFFICIENT_INVENTORY, RESERVATION_NOT_FOUND, RESERVATION_ALREADY_CONSUMED, RESERVATION_EXPIRED, ORDER_NOT_FOUND, ORDER_NOT_CONFIRMABLE, PAYMENT_CONFIRMATION_IN_PROGRESS, FULFILLMENT_INVARIANT_BROKEN, IDEMPOTENCY_CONFLICT] }
     message: { type: string }
     request_id: { type: string }
     retryable: { type: boolean }

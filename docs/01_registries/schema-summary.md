@@ -1,6 +1,6 @@
 # Schema Summary — Global Registry
 **Maintained by:** governance-agent  
-**Last updated by:** RFC-TKT001-01  
+**Last updated by:** RFC-TKT001-02  
 **Database:** MySQL 8, `ticket_core`
 
 ---
@@ -69,20 +69,43 @@
 
 ## ticket_order
 
-**Purpose:** 由 Reservation 派生的 Order 主记录，初始态固定为 `PENDING_PAYMENT`。  
-**Introduced by:** RFC-TKT001-01  
+**Purpose:** 由 Reservation 派生的 Order 主记录，支付确认后可推进到 `CONFIRMED`。  
+**Introduced by:** RFC-TKT001-01（RFC-TKT001-02 扩展）  
 
 | Column | Type | Nullable | Default | Constraints | Notes |
 |:--|:--|:--|:--|:--|:--|
 | `order_id` | VARCHAR(64) | NO | — | PK | Order 标识符 |
 | `external_trade_no` | VARCHAR(64) | NO | — | UK `uk_ticket_order_external_trade_no` | 整笔交易关联键 |
 | `reservation_id` | VARCHAR(64) | NO | — | UK `uk_ticket_order_reservation_id` | 物理保证一个 Reservation 只落一个 Order |
-| `status` | VARCHAR(32) | NO | — | — | 当前仅 `PENDING_PAYMENT`（RFC-02 扩展 `CONFIRMED`/`CLOSED`） |
+| `status` | VARCHAR(32) | NO | — | — | `PENDING_PAYMENT` / `CONFIRMED` / `CLOSED` |
 | `buyer_ref` | VARCHAR(64) | NO | — | — | 来自上游渠道的购买方标识 |
 | `contact_phone` | VARCHAR(32) | YES | NULL | — | 购买方联系电话 |
 | `contact_email` | VARCHAR(128) | YES | NULL | — | 购买方联系邮箱 |
 | `submission_context_json` | JSON | YES | NULL | — | 下单上下文 payload |
 | `payment_deadline_at` | DATETIME(3) | NO | — | — | 支付截止时间（超时关闭扫描入口） |
+| `confirmed_at` | DATETIME(3) | YES | NULL | — | 支付确认落单时间，进入 `CONFIRMED` 时写入 |
+| `version` | BIGINT | NO | 0 | — | 乐观锁版本号，保护支付确认与后续关闭竞争 |
+| `created_at` | DATETIME(3) | NO | CURRENT_TIMESTAMP(3) | — | 创建时间 |
+| `updated_at` | DATETIME(3) | NO | CURRENT_TIMESTAMP(3) | ON UPDATE | 最后更新时间 |
+
+---
+
+## fulfillment_record
+
+**Purpose:** Payment Confirmation 成功后创建的履约投影，作为后续履约执行的唯一稳定起点。  
+**Introduced by:** RFC-TKT001-02  
+
+| Column | Type | Nullable | Default | Constraints | Notes |
+|:--|:--|:--|:--|:--|:--|
+| `fulfillment_id` | VARCHAR(64) | NO | — | PK | Fulfillment 标识符 |
+| `order_id` | VARCHAR(64) | NO | — | UK `uk_fulfillment_record_order_id` | 物理保证一个 Order 只生成一个 Fulfillment |
+| `status` | VARCHAR(32) | NO | — | — | 当前固定为 `PENDING` |
+| `payment_provider` | VARCHAR(64) | NO | — | — | 触发确认的支付渠道 |
+| `provider_event_id` | VARCHAR(128) | NO | — | — | 渠道事件 ID，用于回调排障 |
+| `provider_payment_id` | VARCHAR(128) | YES | NULL | — | 渠道支付单号，若上游提供则落库 |
+| `confirmed_at` | DATETIME(3) | NO | — | — | 业务确认时间，来自支付回调 |
+| `channel_context_json` | JSON | YES | NULL | — | 标准化后的渠道上下文 payload |
+| `version` | BIGINT | NO | 0 | — | 预留给后续履约状态迁移的乐观锁字段 |
 | `created_at` | DATETIME(3) | NO | CURRENT_TIMESTAMP(3) | — | 创建时间 |
 | `updated_at` | DATETIME(3) | NO | CURRENT_TIMESTAMP(3) | ON UPDATE | 最后更新时间 |
 
