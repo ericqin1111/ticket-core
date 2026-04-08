@@ -1,6 +1,8 @@
 package com.ticket.core.integration;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ticket.core.common.dto.ErrorResponse;
 import com.ticket.core.fulfillment.entity.FulfillmentRecord;
 import com.ticket.core.order.entity.TicketOrder;
@@ -8,17 +10,27 @@ import com.ticket.core.payment.dto.PaymentConfirmationResponse;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 @DisplayName("Payment Confirmation API — POST /payments/confirmations")
 class PaymentConfirmationApiIT extends AbstractIntegrationTest {
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     private Map<String, Object> buildConfirmationBody(String externalTradeNo) {
         Map<String, Object> body = new HashMap<>();
@@ -32,6 +44,13 @@ class PaymentConfirmationApiIT extends AbstractIntegrationTest {
         channelContext.put("traceId", "trace-" + externalTradeNo);
         body.put("channelContext", channelContext);
         return body;
+    }
+
+    private HttpEntity<String> rawJsonWithIdempotencyKey(String rawJson, String idempotencyKey) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("Idempotency-Key", idempotencyKey);
+        return new HttpEntity<>(rawJson, headers);
     }
 
     @Test
@@ -208,5 +227,97 @@ class PaymentConfirmationApiIT extends AbstractIntegrationTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().getCode()).isEqualTo("IDEMPOTENCY_CONFLICT");
+    }
+
+    @Test
+    @DisplayName("RFC snake_case request contract should be accepted and return snake_case fields")
+    void confirmPayment_rfcSnakeCaseContract_returnsSnakeCasePayload() throws Exception {
+        insertOrder("order-pay-contract-001", "trade-pay-contract-001", "res-pay-contract-001");
+
+        String requestBody = """
+                {
+                  "external_trade_no": "trade-pay-contract-001",
+                  "payment_provider": "WECHAT_PAY",
+                  "provider_event_id": "evt-trade-pay-contract-001",
+                  "provider_payment_id": "pay-trade-pay-contract-001",
+                  "confirmed_at": "2026-04-07T16:30:00+08:00",
+                  "channel_context": {
+                    "channel": "wechat",
+                    "trace_id": "trace-trade-pay-contract-001"
+                  }
+                }
+                """;
+
+        ResponseEntity<String> response = restTemplate.postForEntity(
+                "/payments/confirmations",
+                rawJsonWithIdempotencyKey(requestBody, UUID.randomUUID().toString()),
+                String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode json = objectMapper.readTree(response.getBody());
+        assertThat(json.has("external_trade_no")).isTrue();
+        assertThat(json.has("order_id")).isTrue();
+        assertThat(json.has("order_status")).isTrue();
+        assertThat(json.has("fulfillment_id")).isTrue();
+        assertThat(json.has("fulfillment_status")).isTrue();
+        assertThat(json.has("payment_confirmation_status")).isTrue();
+        assertThat(json.has("confirmed_at")).isTrue();
+    }
+
+    @Test
+    @DisplayName("Concurrent confirmations with different Idempotency-Key keep one fulfillment invariant")
+    void confirmPayment_concurrentDifferentIdempotencyKeys_keepsSingleFulfillmentInvariant() throws Exception {
+        insertOrder("order-pay-concurrent-001", "trade-pay-concurrent-001", "res-pay-concurrent-001");
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<ResponseEntity<String>> first = executor.submit(() -> postConcurrentConfirmation(
+                    "trade-pay-concurrent-001", ready, start));
+            Future<ResponseEntity<String>> second = executor.submit(() -> postConcurrentConfirmation(
+                    "trade-pay-concurrent-001", ready, start));
+
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+
+            ResponseEntity<String> firstResponse = first.get(10, TimeUnit.SECONDS);
+            ResponseEntity<String> secondResponse = second.get(10, TimeUnit.SECONDS);
+
+            assertConcurrentOutcome(firstResponse);
+            assertConcurrentOutcome(secondResponse);
+
+            Long fulfillmentCount = fulfillmentRecordMapper.selectCount(
+                    new LambdaQueryWrapper<FulfillmentRecord>()
+                            .eq(FulfillmentRecord::getOrderId, "order-pay-concurrent-001"));
+            assertThat(fulfillmentCount).isEqualTo(1L);
+
+            TicketOrder order = ticketOrderMapper.selectById("order-pay-concurrent-001");
+            assertThat(order).isNotNull();
+            assertThat(order.getStatus()).isEqualTo("CONFIRMED");
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private ResponseEntity<String> postConcurrentConfirmation(
+            String externalTradeNo, CountDownLatch ready, CountDownLatch start) throws InterruptedException {
+        ready.countDown();
+        assertThat(start.await(5, TimeUnit.SECONDS)).isTrue();
+        return restTemplate.postForEntity(
+                "/payments/confirmations",
+                withIdempotencyKey(buildConfirmationBody(externalTradeNo), UUID.randomUUID().toString()),
+                String.class);
+    }
+
+    private void assertConcurrentOutcome(ResponseEntity<String> response) throws Exception {
+        assertThat(response.getStatusCode().value()).isIn(200, 409);
+        JsonNode json = objectMapper.readTree(response.getBody());
+        if (response.getStatusCode().is2xxSuccessful()) {
+            assertThat(json.path("paymentConfirmationStatus").asText()).isIn("APPLIED", "REPLAYED");
+            return;
+        }
+        assertThat(json.path("code").asText()).isEqualTo("PAYMENT_CONFIRMATION_IN_PROGRESS");
+        assertThat(json.path("retryable").asBoolean()).isTrue();
     }
 }
