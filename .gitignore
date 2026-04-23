@@ -37,7 +37,6 @@ hs_err_pid*
 application-local.yml
 application-dev.yml
 .env
-docs/
 ############################
 # 7. MyBatis
 ############################
@@ -64,7 +63,7 @@ docs/
 .claude/
 .cursor/
 .cache/
-
+skills/
 AGENTS.md
 CLAUDE.md
 
