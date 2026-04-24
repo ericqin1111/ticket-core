@@ -41,6 +41,13 @@
 | `ORDER_NOT_CONFIRMABLE` | 409 | false | feat-TKT001-02 / feat-TKT001-03 | 订单状态不是 `PENDING_PAYMENT`（已 `CONFIRMED`、已 `CLOSED` 或其他不可确认状态） |
 | `PAYMENT_CONFIRMATION_IN_PROGRESS` | 409 | true | feat-TKT001-02 | 同 key 并发确认进行中，客户端可携同 key 重试 |
 | `FULFILLMENT_INVARIANT_BROKEN` | 409 | false | feat-TKT001-02 | `Order.CONFIRMED` 却无稳定 Fulfillment 投影，需人工介入 |
+| `FULFILLMENT_NOT_FOUND` | 404 | false | feat-TKT002-01 | `fulfillment_id` 不存在 |
+| `FULFILLMENT_NOT_CLAIMABLE` | 409 | false | feat-TKT002-01 | fulfillment 当前状态不是 `PENDING`，无法再接管 |
+| `FULFILLMENT_CLAIM_CONFLICT` | 409 | true | feat-TKT002-01 | 并发 claim 竞争失败；可在后续扫描轮次重试 |
+| `FULFILLMENT_ATTEMPT_MISMATCH` | 409 | false | feat-TKT002-01 | 提交终局或治理更新的 attempt 不是当前持有执行权的 attempt |
+| `FULFILLMENT_ALREADY_TERMINAL` | 409 | false | feat-TKT002-01 | fulfillment 已进入 `SUCCEEDED` 或 `FAILED` |
+| `DELIVERY_RESULT_REQUIRED` | 422 | false | feat-TKT002-01 | 成功终局缺少最小 `DeliveryResult` 摘要 |
+| `FAILURE_SUMMARY_REQUIRED` | 422 | false | feat-TKT002-01 | 失败终局缺少最小 `FailureSummary` 摘要 |
 | `IDEMPOTENCY_CONFLICT` | 409 | false | feat-TKT001-01 | 同 `Idempotency-Key` + 不同 `request_hash` |
 
 ---
@@ -59,3 +66,4 @@
 * `feat-TKT001-01`：引入 `CATALOG_ITEM_NOT_SELLABLE` / `INSUFFICIENT_INVENTORY` / `RESERVATION_*` / `IDEMPOTENCY_CONFLICT`。
 * `feat-TKT001-02`：引入 `ORDER_NOT_FOUND` / `ORDER_NOT_CONFIRMABLE` / `PAYMENT_CONFIRMATION_IN_PROGRESS` / `FULFILLMENT_INVARIANT_BROKEN`。
 * `feat-TKT001-03`：复用 `ORDER_NOT_CONFIRMABLE` 作为 timeout close 后的稳定拒绝码；新增 `PAYMENT_CONFIRMATION_REJECTED` 为**审计事件类型**而非 HTTP error code。
+* `feat-TKT002-01`：引入 fulfillment processing 相关错误码：`FULFILLMENT_NOT_FOUND` / `FULFILLMENT_NOT_CLAIMABLE` / `FULFILLMENT_CLAIM_CONFLICT` / `FULFILLMENT_ATTEMPT_MISMATCH` / `FULFILLMENT_ALREADY_TERMINAL` / `DELIVERY_RESULT_REQUIRED` / `FAILURE_SUMMARY_REQUIRED`。

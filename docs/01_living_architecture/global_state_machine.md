@@ -67,23 +67,53 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     [*] --> PENDING: 首次有效支付确认创建 fulfillment
-    PENDING --> [*]
+    PENDING --> PROCESSING: ClaimFulfillmentForProcessing 胜出
+    PROCESSING --> PROCESSING: RecordFulfillmentResultLeftProcessing
+    PROCESSING --> SUCCEEDED: MarkFulfillmentSucceeded
+    PROCESSING --> FAILED: MarkFulfillmentFailed
+    SUCCEEDED --> [*]
+    FAILED --> [*]
 ```
 
 **Transition ownership**
 
-| Transition | 触发方 | 事务边界 | 物理约束 | 审计事件 |
+| Transition | 触发方 | 事务边界 | 乐观锁守护 | 审计事件 |
 |:--|:--|:--|:--|:--|
 | `[*] → PENDING` | Payment Confirmation Module | T2 PaymentConfirmation | `uk_fulfillment_record_order_id`（每个 Order 只能一条） | `FULFILLMENT_CREATED` |
+| `PENDING → PROCESSING` | Fulfillment Dispatcher / Executor | T4 FulfillmentClaim | `fulfillment.version` CAS | `FULFILLMENT_PROCESSING_STARTED` |
+| `PROCESSING → PROCESSING` | Fulfillment Executor / Governance | T5 FulfillmentLeftProcessing | `fulfillment.version` CAS + `attemptId == currentAttemptId` | `FULFILLMENT_RESULT_LEFT_PROCESSING` |
+| `PROCESSING → SUCCEEDED` | Fulfillment Executor | T6 FulfillmentSuccess | `fulfillment.version` CAS + `attemptId == currentAttemptId` | `FULFILLMENT_SUCCEEDED` |
+| `PROCESSING → FAILED` | Fulfillment Executor | T7 FulfillmentFailure | `fulfillment.version` CAS + `attemptId == currentAttemptId` | `FULFILLMENT_FAILED` |
 
 **关键不变量**
 
-* Phase 1 暂冻结在 `PENDING`；后续履约执行的状态扩展由新 feat 接管，本文件届时追加新迁移。
-* 一个 `Order.CONFIRMED` 必须且只能对应一条 `Fulfillment.PENDING`。该不变量同时由业务规则与 `uk_fulfillment_record_order_id` 物理约束双保险。
+* 一个 `Order.CONFIRMED` 必须且只能对应一条 `Fulfillment`；该不变量同时由业务规则与 `uk_fulfillment_record_order_id` 物理约束双保险。
+* `PENDING` 是唯一入口；`PROCESSING` 有合法入口和出口，不形成拓扑死胡同。
+* `SUCCEEDED` 与 `FAILED` 互斥且终态；一旦到达，任何 reopen、retry、回退到 `PENDING` 或重新 claim 都被禁止。
+* claim loser 不得热点自旋；只能返回稳定冲突语义并等待后续扫描轮次重试。
+* 外部 provider 调用与本地终局提交不承诺分布式原子性；若结果已发生但本地无法安全定终局，必须通过 `PROCESSING → PROCESSING` 留在治理态，而不是回退到 `PENDING`。
+
+## 4. FulfillmentAttempt State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> EXECUTING: ClaimFulfillmentForProcessing 胜出
+    EXECUTING --> EXECUTING: RecordFulfillmentResultLeftProcessing
+    EXECUTING --> SUCCEEDED: MarkFulfillmentSucceeded
+    EXECUTING --> FAILED: MarkFulfillmentFailed
+    SUCCEEDED --> [*]
+    FAILED --> [*]
+```
+
+**关键不变量**
+
+* Stage A 只允许单个有效 attempt；状态机保留 `0..N` 扩展空间，但当前冻结为 `attemptNo = 1`。
+* `EXECUTING` 是唯一非终态；保守滞留只更新诊断，不释放执行权。
+* attempt 终局必须与所属 `Fulfillment` 终局同事务提交，禁止 attempt 与 aggregate 终态漂移。
 
 ---
 
-## 4. IdempotencyRecord State Machine
+## 5. IdempotencyRecord State Machine
 
 ```mermaid
 stateDiagram-v2
@@ -109,7 +139,7 @@ stateDiagram-v2
 
 ---
 
-## 5. CatalogItem / InventoryResource（静态生命周期）
+## 6. CatalogItem / InventoryResource（静态生命周期）
 
 当前 Phase 1 只冻结 `status` 语义，不存在动作驱动的状态迁移。
 
@@ -118,7 +148,9 @@ stateDiagram-v2
 
 ---
 
-## 6. 并发裁决规则（Payment vs Timeout）
+## 7. 并发裁决规则
+
+### 7.1 Payment vs Timeout
 
 同一 `TicketOrder.PENDING_PAYMENT` 可能同时被「Payment Confirmation」与「Timeout Sweep」竞争。裁决规则：
 
@@ -131,13 +163,30 @@ stateDiagram-v2
 
 ---
 
-## 7. 跨聚合事务边界索引
+### 7.2 Fulfillment Claim vs Terminal Commit
+
+同一 `Fulfillment` 在 Stage A 中可能被多个 dispatcher / executor 竞争。裁决规则：
+
+1. `ClaimFulfillmentForProcessing` 使用 `fulfillment.version` CAS 作为唯一抢占裁决；只有一个胜者能把 `PENDING` 推进到 `PROCESSING` 并创建当前 attempt。
+2. `MarkFulfillmentSucceeded`、`MarkFulfillmentFailed`、`RecordFulfillmentResultLeftProcessing` 都必须同时满足：
+   * `status = PROCESSING`
+   * `attemptId == currentAttemptId`
+   * `expectedVersion` 匹配
+3. claim 败者返回 `FULFILLMENT_CLAIM_CONFLICT`；若调用开始前对象已非 `PENDING`，返回 `FULFILLMENT_NOT_CLAIMABLE`。
+4. 终局提交败者不得覆盖当前状态；必须返回稳定业务错误（`FULFILLMENT_ATTEMPT_MISMATCH` / `FULFILLMENT_ALREADY_TERMINAL` / `FULFILLMENT_INVARIANT_BROKEN`）。
+5. 任一败者都不允许释放执行权、不允许自动重试旧 attempt、不允许回退到 `PENDING`。
+
+## 8. 跨聚合事务边界索引
 
 | 事务 ID | 触发动作 | 覆盖写 | 冲突守护 | 详见 |
 |:--|:--|:--|:--|:--|
 | T1 | POST /orders | `reservation_record`（ACTIVE→CONSUMED）+ `ticket_order`（insert）+ `idempotency_record` | `reservation.version` CAS + `uk_ticket_order_reservation_id` | `domain_models.md §4.1` |
 | T2 | POST /payments/confirmations | `ticket_order`（PENDING_PAYMENT→CONFIRMED）+ `fulfillment_record`（insert）+ `audit_trail_event` + `idempotency_record` | `ticket_order.version` CAS + `uk_fulfillment_record_order_id` | `domain_models.md §4.2` |
 | T3 | Order Timeout Sweep | `ticket_order`（PENDING_PAYMENT→CLOSED）+ `reservation_record`（CONSUMED→EXPIRED）+ `inventory_resource`（restore reserved_quantity）+ `audit_trail_event` | `ticket_order.version` CAS + `reservation.version` CAS + `inventory.version` CAS | `domain_models.md §4.3` |
+| T4 | ClaimFulfillmentForProcessing | `fulfillment_record`（PENDING→PROCESSING）+ `fulfillment_attempt_record`（insert EXECUTING）+ `audit_trail_event` | `fulfillment.version` CAS | `domain_models.md §4.4` |
+| T5 | RecordFulfillmentResultLeftProcessing | `fulfillment_record`（PROCESSING→PROCESSING）+ `fulfillment_attempt_record`（diagnostic update）+ `audit_trail_event` | `fulfillment.version` CAS + attempt ownership check | `domain_models.md §4.4` |
+| T6 | MarkFulfillmentSucceeded | `fulfillment_record`（PROCESSING→SUCCEEDED）+ `fulfillment_attempt_record`（EXECUTING→SUCCEEDED）+ `audit_trail_event` | `fulfillment.version` CAS + attempt ownership check | `domain_models.md §4.4` |
+| T7 | MarkFulfillmentFailed | `fulfillment_record`（PROCESSING→FAILED）+ `fulfillment_attempt_record`（EXECUTING→FAILED）+ `audit_trail_event` | `fulfillment.version` CAS + attempt ownership check | `domain_models.md §4.4` |
 
 **跨事务统一约束**
 
@@ -147,12 +196,14 @@ stateDiagram-v2
 
 ---
 
-## 8. Provenance
+## 9. Provenance
 
 | 状态机 | 首次冻结 | 后续扩展 |
 |:--|:--|:--|
 | Reservation（ACTIVE / CONSUMED / EXPIRED） | `feat-TKT001-01` | `feat-TKT001-03` 增加 `CONSUMED → EXPIRED` |
 | TicketOrder（PENDING_PAYMENT / CONFIRMED / CLOSED） | `feat-TKT001-01` 冻结 `PENDING_PAYMENT`；`feat-TKT001-02` 引入 `CONFIRMED` | `feat-TKT001-03` 引入 `CLOSED` |
-| Fulfillment（PENDING） | `feat-TKT001-02` | — |
+| Fulfillment（`PENDING / PROCESSING / SUCCEEDED / FAILED`） | `feat-TKT001-02` 冻结 `PENDING` | `feat-TKT002-01` 引入 processing backbone |
+| FulfillmentAttempt（`EXECUTING / SUCCEEDED / FAILED`） | `feat-TKT002-01` | — |
 | IdempotencyRecord（PROCESSING / SUCCEEDED / FAILED） | `feat-TKT001-01` | `feat-TKT001-02` 将 PAYMENT_CONFIRMATION 纳入幂等作用域 |
 | Payment vs Timeout 裁决 | `feat-TKT001-03` | — |
+| Fulfillment Claim / Terminal 裁决 | `feat-TKT002-01` | — |

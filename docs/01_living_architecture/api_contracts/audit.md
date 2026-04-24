@@ -70,6 +70,11 @@ Phase 1 的 Audit Trail 只冻结 **append-only 内部 contract**，不暴露 pu
 | `PAYMENT_CONFIRMATION_REPLAYED` | Payment Confirmation 幂等回放 | — | `order_id`, `provider_event_id` | feat-TKT001-03 (补录) |
 | `PAYMENT_CONFIRMATION_REJECTED` | Payment Confirmation 到达时订单已 `CLOSED` / 不可确认 | 拒绝事务 | `order_id`, `provider_event_id`, `reason_code` | feat-TKT001-03 |
 | `FULFILLMENT_CREATED` | `Fulfillment.PENDING` 创建 | T2 | `order_id`, `fulfillment_id` | feat-TKT001-03 (补录) |
+| `FULFILLMENT_DISPATCH_CANDIDATE_FOUND` | dispatch 扫描发现可 claim 候选 | dispatch 扫描事务 | `fulfillment_id`, `order_id`, `reason_code` | feat-TKT002-01 |
+| `FULFILLMENT_PROCESSING_STARTED` | claim 胜出，`Fulfillment.PENDING -> PROCESSING` | T4 | `fulfillment_id`, `order_id`, `reason_code` | feat-TKT002-01 |
+| `FULFILLMENT_RESULT_LEFT_PROCESSING` | 结果不确定，保守停留在 `PROCESSING` | T5 | `fulfillment_id`, `order_id`, `attempt_id`, `reason_code` | feat-TKT002-01 |
+| `FULFILLMENT_SUCCEEDED` | 履约成功终局提交 | T6 | `fulfillment_id`, `order_id`, `attempt_id`, `reason_code` | feat-TKT002-01 |
+| `FULFILLMENT_FAILED` | 履约失败终局提交 | T7 | `fulfillment_id`, `order_id`, `attempt_id`, `reason_code` | feat-TKT002-01 |
 | `INVENTORY_RESTORED` | Order timeout close 时库存回补 | T3 | `inventory_resource_id`, `reservation_id` | feat-TKT001-03 |
 
 ---
@@ -79,6 +84,8 @@ Phase 1 的 Audit Trail 只冻结 **append-only 内部 contract**，不暴露 pu
 * Audit append 与业务主状态**同事务提交**；任何一方回滚，另一方必须回滚。
 * 不允许"主状态成功、审计缺失"；不允许"审计成功、主状态未提交"。
 * `audit_trail_event` 只 append，不 update、不 delete；违反即视为治理事故。
+* `FULFILLMENT_DISPATCH_CANDIDATE_FOUND.occurred_at` 记录的是本次扫描观察时刻，不得复用 fulfillment 创建时间。
+* Fulfillment processing 相关事件的 `reason_code` 冻结为：`DISPATCH_SCAN_MATCHED`、`PROCESSING_CLAIMED`、`RESULT_UNCERTAIN_LEFT_PROCESSING`、`DELIVERY_COMPLETED`、`DELIVERY_FAILED`。
 
 ---
 

@@ -123,22 +123,84 @@ interface TicketOrder {
 interface Fulfillment {
   fulfillmentId: string;           // PK
   orderId: string;                 // UK, 物理保证一单一履约
-  status: "PENDING";               // 当前唯一值；预留扩展
+  status: "PENDING" | "PROCESSING" | "SUCCEEDED" | "FAILED";
   paymentProvider: string;
   providerEventId: string;         // 渠道事件 ID，用于回调排障
   providerPaymentId: string?;      // 渠道支付单号，若提供则落库
   confirmedAt: DateTime;           // 业务确认时间
+  currentAttemptId: string?;       // status = PROCESSING 时必填
+  processingStartedAt: DateTime?;  // status = PROCESSING 时必填
+  terminalAt: DateTime?;           // status in SUCCEEDED | FAILED 时必填
+  executionPath: "DEFAULT_PROVIDER";
+  deliveryResult: DeliveryResult?; // status = SUCCEEDED 时必填
+  lastFailure: FailureSummary?;    // status = FAILED 时必填
+  lastDiagnosticTrace: DiagnosticTrace;
   channelContext: Map<string, string>?;
-  version: long;                   // 预留后续履约推进的乐观锁
+  version: long;                   // claim / terminal 提交统一使用 CAS
   createdAt: DateTime;
   updatedAt: DateTime;
+}
+
+interface FulfillmentAttempt {
+  attemptId: string;
+  fulfillmentId: string;           // N:1 to Fulfillment
+  attemptNo: int;                  // Stage A 冻结为 1
+  status: "EXECUTING" | "SUCCEEDED" | "FAILED";
+  dispatcherRunId: string;
+  executorRef: string;
+  executionPath: "DEFAULT_PROVIDER";
+  claimedAt: DateTime;
+  startedAt: DateTime?;
+  finishedAt: DateTime?;
+  deliveryResult: DeliveryResult?;
+  failure: FailureSummary?;
+  diagnosticTrace: DiagnosticTrace;
+}
+
+interface DeliveryResult {
+  resourceType: string;
+  resourceId: string;
+  payloadSummary: Map<string, string | number | boolean>;
+  deliveredAt: DateTime;
+}
+
+interface FailureSummary {
+  reasonCode: "PROVIDER_REJECTED" | "PROVIDER_TIMEOUT" | "PROVIDER_TECHNICAL_FAILURE" | "DELIVERY_RESULT_INVALID";
+  reasonMessage: string;           // concise stable summary, not raw stack trace
+  failedAt: DateTime;
+}
+
+interface DiagnosticTrace {
+  traceId: string;
+  decision:
+    | "DISPATCH_CANDIDATE_FOUND"
+    | "CLAIM_ACCEPTED"
+    | "CLAIM_REJECTED"
+    | "EXECUTION_STARTED"
+    | "PROVIDER_CALL_SUCCEEDED"
+    | "PROVIDER_CALL_FAILED"
+    | "RESULT_COMMITTED"
+    | "RESULT_LEFT_PROCESSING";
+  providerCorrelationKey: string?;
+  externalCallRef: string?;
+  errorDetailSummary: string?;
+  observedAt: DateTime;
+  tags: Map<string, string>;
 }
 ```
 
 **规则:**
-- 在 Payment Confirmation 成功事务内创建，与 `Order.CONFIRMED` 位于同一本地事务。
+- 在 Payment Confirmation 成功事务内创建初始 `Fulfillment.PENDING`，与 `Order.CONFIRMED` 位于同一本地事务。
 - `orderId` 唯一约束**物理兜底** "一单一履约"；**不为 providerEventId 加唯一约束**（它只承担 traceability，不替代动作级幂等）。
-- 本阶段仅 `PENDING`，后续 RFC 可扩展 `PROCESSING / SUCCEEDED / FAILED`。
+- `Fulfillment (1) -> (N) FulfillmentAttempt` 为未来扩展预留，但 Stage A 只允许一个有效执行尝试，`attemptNo = 1`。
+- `status = PROCESSING` 时，必须存在且仅存在一个 `currentAttemptId` 指向 `status = EXECUTING` 的 attempt。
+- `status = SUCCEEDED` 时，`deliveryResult` 与 `terminalAt` 必填，`lastFailure` 必须为空。
+- `status = FAILED` 时，`lastFailure` 与 `terminalAt` 必填，`deliveryResult` 必须为空。
+- `status in {SUCCEEDED, FAILED}` 时，终态不可逆；不得再迁回 `PENDING` 或 `PROCESSING`。
+- 只有与 `currentAttemptId` 匹配的 attempt 才有资格提交成功或失败终局。
+- `PROCESSING -> PROCESSING` 仅允许记录保守滞留诊断；不得释放执行权、不得伪造成功/失败终局、不得回退到 `PENDING`。
+- `executionPath` 在 Stage A 固定为 `DEFAULT_PROVIDER`，不得引入 provider route、fallback path 或多实现编排。
+- `lastDiagnosticTrace` 为治理必填字段；空值视为 invariant broken。
 
 ### 2.6 `AuditTrailEvent`
 
@@ -168,12 +230,21 @@ type EventType =
   | "RESERVATION_CREATED" | "RESERVATION_CONSUMED" | "RESERVATION_RELEASED"
   | "ORDER_CREATED" | "ORDER_CONFIRMED" | "ORDER_TIMEOUT_CLOSED"
   | "PAYMENT_CONFIRMATION_APPLIED" | "PAYMENT_CONFIRMATION_REPLAYED" | "PAYMENT_CONFIRMATION_REJECTED"
-  | "FULFILLMENT_CREATED" | "INVENTORY_RESTORED";
+  | "FULFILLMENT_CREATED"
+  | "FULFILLMENT_DISPATCH_CANDIDATE_FOUND"
+  | "FULFILLMENT_PROCESSING_STARTED"
+  | "FULFILLMENT_RESULT_LEFT_PROCESSING"
+  | "FULFILLMENT_SUCCEEDED"
+  | "FULFILLMENT_FAILED"
+  | "INVENTORY_RESTORED";
 
 type ReasonCode =
   | "ORDER_PAYMENT_TIMEOUT" | "RESERVATION_TTL_EXPIRED"
   | "PAYMENT_CONFIRMED" | "PAYMENT_REPLAYED"
-  | "CLOSED_BY_TIMEOUT" | "MANUAL_ACTION" | "NOT_APPLICABLE";
+  | "CLOSED_BY_TIMEOUT" | "MANUAL_ACTION" | "NOT_APPLICABLE"
+  | "DISPATCH_SCAN_MATCHED" | "PROCESSING_CLAIMED"
+  | "RESULT_UNCERTAIN_LEFT_PROCESSING"
+  | "DELIVERY_COMPLETED" | "DELIVERY_FAILED";
 ```
 
 **规则:**
@@ -219,8 +290,11 @@ Reservation (N) ─────────(1) InventoryResource     [lock / rel
      │ consume (1:1)
      ▼
 TicketOrder (1) ─── (0..1) Fulfillment             [一单一履约]
-     │                        │
-     │                        │
+                              │
+                              │ owns
+                              ▼
+                      FulfillmentAttempt (0..N)
+     │
      ▼                        ▼
   AuditTrailEvent (append-only, 引用所有聚合的 id)
 ```
@@ -228,6 +302,7 @@ TicketOrder (1) ─── (0..1) Fulfillment             [一单一履约]
 **关键约束:**
 - `Reservation -> TicketOrder`：严格 1:1；不允许正常主链路绕过 Reservation 直接创建 Order。
 - `TicketOrder -> Fulfillment`：严格 1:1；由 `fulfillment_record.order_id` 唯一约束兜底。
+- `Fulfillment -> FulfillmentAttempt`：Stage A 逻辑上允许 `0..N`，但冻结为最多 1 个有效 attempt；后续多次尝试需新 feat 明确扩展。
 - `AuditTrailEvent`：旁路关联，不参与事务一致性裁决，但 timeout close 路径中的 append 必须与主状态迁移同事务。
 
 ---
@@ -264,6 +339,20 @@ TicketOrder (1) ─── (0..1) Fulfillment             [一单一履约]
 
 **任一子步骤失败 → 整笔回滚**，等下一轮扫描重试。不接受 "先关闭再异步补偿" 的降级。
 
+### 4.4 Fulfillment Claim / Terminal Commit（feat-TKT002-01）
+
+Stage A 的 Fulfillment Processing 由以下本地事务组成：
+
+1. T4 Claim：`Fulfillment.PENDING -> PROCESSING`，创建 `FulfillmentAttempt(EXECUTING)`，写入 `currentAttemptId`、`processingStartedAt`、`lastDiagnosticTrace`，并 append `FULFILLMENT_PROCESSING_STARTED`。
+2. T5 Left Processing：`Fulfillment.PROCESSING -> PROCESSING`，仅更新 `lastDiagnosticTrace` / attempt 诊断信息，并 append `FULFILLMENT_RESULT_LEFT_PROCESSING`。
+3. T6 Success：`Fulfillment.PROCESSING -> SUCCEEDED`，同时提交 `DeliveryResult`、`terminalAt`、attempt 成功状态，并 append `FULFILLMENT_SUCCEEDED`。
+4. T7 Failure：`Fulfillment.PROCESSING -> FAILED`，同时提交 `FailureSummary`、`terminalAt`、attempt 失败状态，并 append `FULFILLMENT_FAILED`。
+
+统一约束：
+1. 所有事务都以 `fulfillment.version` CAS 作为唯一仲裁，且成功/失败/保守滞留都必须校验 `attemptId == currentAttemptId`。
+2. 不承诺外部 provider 调用与本地终局提交的分布式原子性；若结果已发生但本地无法安全定终局，必须走 T5 保守滞留。
+3. 不接受主状态成功但摘要或审计缺失；任一子步骤失败整笔回滚。
+
 ---
 
 ## 5. Provenance（追溯）
@@ -272,6 +361,7 @@ TicketOrder (1) ─── (0..1) Fulfillment             [一单一履约]
 |---|---|---|
 | `CatalogItem` / `InventoryResource` / `Reservation` / `TicketOrder` / `IdempotencyRecord` | feat-TKT001-01 | — |
 | `TicketOrder.confirmedAt` / `TicketOrder.version` | feat-TKT001-02 | ALTER TABLE |
-| `Fulfillment` | feat-TKT001-02 | — |
+| `Fulfillment` | feat-TKT001-02 | feat-TKT002-01 扩展到 `PROCESSING / SUCCEEDED / FAILED` 并引入 execution metadata |
+| `FulfillmentAttempt` / `DeliveryResult` / `FailureSummary` / `DiagnosticTrace` | feat-TKT002-01 | — |
 | `TicketOrder.closedAt` / `Reservation.releasedAt` | feat-TKT001-03 | ALTER TABLE |
 | `AuditTrailEvent` | feat-TKT001-03 | — |
