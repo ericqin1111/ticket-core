@@ -16,8 +16,9 @@ public interface FulfillmentRecordMapper extends BaseMapper<FulfillmentRecord> {
     @Select("""
             <script>
             SELECT fulfillment_id, order_id, status, payment_provider, provider_event_id, provider_payment_id,
-                   confirmed_at, channel_context_json, current_attempt_id, processing_started_at, terminal_at,
-                   execution_path, delivery_result_json, last_failure_json, last_diagnostic_trace_json,
+                   confirmed_at, channel_context_json, current_attempt_id, latest_attempt_id, processing_started_at,
+                   processing_timeout_at, terminal_at, execution_path, delivery_result_json, last_failure_json,
+                   last_diagnostic_trace_json, retry_policy_json, retry_state_json, latest_failure_decision_json,
                    version, created_at, updated_at
             FROM fulfillment_record
             WHERE status = 'PENDING'
@@ -37,8 +38,9 @@ public interface FulfillmentRecordMapper extends BaseMapper<FulfillmentRecord> {
 
     @Select("""
             SELECT fulfillment_id, order_id, status, payment_provider, provider_event_id, provider_payment_id,
-                   confirmed_at, channel_context_json, current_attempt_id, processing_started_at, terminal_at,
-                   execution_path, delivery_result_json, last_failure_json, last_diagnostic_trace_json,
+                   confirmed_at, channel_context_json, current_attempt_id, latest_attempt_id, processing_started_at,
+                   processing_timeout_at, terminal_at, execution_path, delivery_result_json, last_failure_json,
+                   last_diagnostic_trace_json, retry_policy_json, retry_state_json, latest_failure_decision_json,
                    version, created_at, updated_at
             FROM fulfillment_record
             WHERE status = 'PROCESSING'

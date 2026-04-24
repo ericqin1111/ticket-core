@@ -14,9 +14,10 @@ import java.util.List;
 public interface FulfillmentAttemptRecordMapper extends BaseMapper<FulfillmentAttemptRecord> {
 
     @Select("""
-            SELECT attempt_id, fulfillment_id, attempt_no, status, dispatcher_run_id, executor_ref,
-                   execution_path, claimed_at, started_at, finished_at, delivery_result_json, failure_json,
-                   diagnostic_trace_json, created_at, updated_at
+            SELECT attempt_id, fulfillment_id, attempt_no, trigger, execution_status, status, dispatcher_run_id,
+                   executor_ref, execution_path, claimed_at, started_at, finished_at, delivery_result_json,
+                   failure_json, failure_decision_json, provider_diagnostic_json, diagnostic_trace_json, created_at,
+                   updated_at
             FROM fulfillment_attempt_record
             WHERE fulfillment_id = #{fulfillmentId}
             ORDER BY attempt_no ASC, claimed_at ASC, attempt_id ASC
