@@ -1,7 +1,7 @@
 # Shared Error Codes
 
 **Maintained by:** librarian
-**Last updated by:** migration (from `docs/01_registries/api-catalog.yaml`, RFC-TKT001-01/02/03)
+**Last updated by:** migration (from `docs/01_registries/api-catalog.yaml`, RFC-TKT001-01/02/03, feat-TKT002-01/02)
 
 所有模块的业务错误码共用 `ErrorResponse` 结构。任何新错误码的引入必须由 feat 的 Architect Stage 提案，经 Reviewer 批准后登记到本文件。
 
@@ -49,6 +49,16 @@
 | `DELIVERY_RESULT_REQUIRED` | 422 | false | feat-TKT002-01 | 成功终局缺少最小 `DeliveryResult` 摘要 |
 | `FAILURE_SUMMARY_REQUIRED` | 422 | false | feat-TKT002-01 | 失败终局缺少最小 `FailureSummary` 摘要 |
 | `IDEMPOTENCY_CONFLICT` | 409 | false | feat-TKT001-01 | 同 `Idempotency-Key` + 不同 `request_hash` |
+| `INVALID_STATUS_TRANSITION` | 409 | false | feat-TKT002-02 | 当前 `Fulfillment` / `Attempt` 状态不允许执行该治理动作 |
+| `ATTEMPT_ALREADY_FINALIZED` | 409 | false | feat-TKT002-02 | 当前 attempt 的 `execution_status` 已不再是活跃 `STARTED` |
+| `FAILURE_DECISION_REQUIRED` | 422 | false | feat-TKT002-02 | 观测到的失败信号不足以导出唯一 `FailureDecision` |
+| `FAILURE_CATEGORY_NOT_RETRYABLE` | 409 | false | feat-TKT002-02 | 最近一次失败分类不允许自动重试调度 |
+| `RETRY_BUDGET_EXHAUSTED` | 409 | false | feat-TKT002-02 | 预留错误码：重试预算已耗尽 |
+| `FAST_RETRY_ALREADY_USED` | 409 | false | feat-TKT002-02 | 单次快速重试额度已被消费 |
+| `NEXT_RETRY_NOT_DUE` | 409 | true | feat-TKT002-02 | 当前时间尚未达到退避重试的 `next_retry_at` |
+| `PROCESSING_NOT_TIMED_OUT` | 409 | true | feat-TKT002-02 | 当前 processing lease 尚未超时，治理不能接管 |
+| `IDEMPOTENT_REPLAY_CONFLICT` | 409 | true | feat-TKT002-02 | 同治理动作的同 key 请求正在处理中，或回放与当前状态冲突 |
+| `CONCURRENCY_VERSION_MISMATCH` | 409 | true | feat-TKT002-02 | 提供的 `expected_version` 与最新 `fulfillment.version` 不匹配 |
 
 ---
 
@@ -67,3 +77,4 @@
 * `feat-TKT001-02`：引入 `ORDER_NOT_FOUND` / `ORDER_NOT_CONFIRMABLE` / `PAYMENT_CONFIRMATION_IN_PROGRESS` / `FULFILLMENT_INVARIANT_BROKEN`。
 * `feat-TKT001-03`：复用 `ORDER_NOT_CONFIRMABLE` 作为 timeout close 后的稳定拒绝码；新增 `PAYMENT_CONFIRMATION_REJECTED` 为**审计事件类型**而非 HTTP error code。
 * `feat-TKT002-01`：引入 fulfillment processing 相关错误码：`FULFILLMENT_NOT_FOUND` / `FULFILLMENT_NOT_CLAIMABLE` / `FULFILLMENT_CLAIM_CONFLICT` / `FULFILLMENT_ATTEMPT_MISMATCH` / `FULFILLMENT_ALREADY_TERMINAL` / `DELIVERY_RESULT_REQUIRED` / `FAILURE_SUMMARY_REQUIRED`。
+* `feat-TKT002-02`：引入 fulfillment governance 相关错误码：`INVALID_STATUS_TRANSITION` / `ATTEMPT_ALREADY_FINALIZED` / `FAILURE_DECISION_REQUIRED` / `FAILURE_CATEGORY_NOT_RETRYABLE` / `RETRY_BUDGET_EXHAUSTED` / `FAST_RETRY_ALREADY_USED` / `NEXT_RETRY_NOT_DUE` / `PROCESSING_NOT_TIMED_OUT` / `IDEMPOTENT_REPLAY_CONFLICT` / `CONCURRENCY_VERSION_MISMATCH`。

@@ -14,7 +14,7 @@
 | `InventoryResource` | inventory | 库存总量、已预留量、并发控制基线 | `sellable_quantity = total_quantity - reserved_quantity`（应用层投影，不存储） |
 | `Reservation` | reservation | 锁票凭证，承载 TTL 与 consume 一次性约束 | 同一 Reservation 仅可被 consume 一次；三态 `ACTIVE / CONSUMED / EXPIRED` |
 | `TicketOrder` | order | 由 Reservation 派生的 Order 主记录 | 一个 Reservation 物理约束只派生一个 Order；三态 `PENDING_PAYMENT / CONFIRMED / CLOSED` |
-| `Fulfillment` | fulfillment | Payment Confirmation 成功后创建的履约投影 | 一个 Order 物理约束只生成一个 Fulfillment |
+| `Fulfillment` | fulfillment | Payment Confirmation 成功后创建的履约与治理聚合 | 一个 Order 物理约束只生成一个 Fulfillment；自动重试与人工接管都围绕该聚合收敛 |
 | `AuditTrailEvent` | audit | append-only 审计事件（关键状态变化 + 拒绝结果） | 不可变、不可删，只记录已提交业务事实 |
 | `IdempotencyRecord` | infrastructure | 动作级幂等命中结果与冲突检测 | `(action_name, idempotency_key)` 唯一；三态 `PROCESSING / SUCCEEDED / FAILED` |
 
@@ -123,29 +123,56 @@ interface TicketOrder {
 interface Fulfillment {
   fulfillmentId: string;           // PK
   orderId: string;                 // UK, 物理保证一单一履约
-  status: "PENDING" | "PROCESSING" | "SUCCEEDED" | "FAILED";
+  status: "PENDING" | "PROCESSING" | "RETRY_PENDING" | "MANUAL_PENDING" | "SUCCEEDED" | "FAILED";
   paymentProvider: string;
   providerEventId: string;         // 渠道事件 ID，用于回调排障
   providerPaymentId: string?;      // 渠道支付单号，若提供则落库
   confirmedAt: DateTime;           // 业务确认时间
   currentAttemptId: string?;       // status = PROCESSING 时必填
+  latestAttemptId: string?;        // 最近一次 attempt（包括已收口历史 attempt）
   processingStartedAt: DateTime?;  // status = PROCESSING 时必填
+  processingTimeoutAt: DateTime?;  // status = PROCESSING 时必填，治理 lease 截止点
   terminalAt: DateTime?;           // status in SUCCEEDED | FAILED 时必填
   executionPath: "DEFAULT_PROVIDER";
   deliveryResult: DeliveryResult?; // status = SUCCEEDED 时必填
-  lastFailure: FailureSummary?;    // status = FAILED 时必填
+  lastFailure: FailureSummary?;    // Stage A 失败摘要兼容字段
   lastDiagnosticTrace: DiagnosticTrace;
+  retryPolicy: RetryPolicySnapshot;
+  retryState: RetryState;
+  latestFailure: FailureDecision?;
   channelContext: Map<string, string>?;
   version: long;                   // claim / terminal 提交统一使用 CAS
   createdAt: DateTime;
   updatedAt: DateTime;
 }
 
+interface RetryPolicySnapshot {
+  fastRetryLimit: int;
+  backoffRetryLimit: int;
+  totalRetryBudget: int;
+  backoffSchedule: Duration[];
+}
+
+interface RetryState {
+  fastRetryUsed: int;
+  backoffRetryUsed: int;
+  totalRetryUsed: int;
+  nextRetryAt: DateTime?;
+  budgetExhausted: boolean;
+}
+
+interface ProcessingLease {
+  processingStartedAt: DateTime;
+  timeoutAt: DateTime;
+}
+
 interface FulfillmentAttempt {
   attemptId: string;
   fulfillmentId: string;           // N:1 to Fulfillment
-  attemptNo: int;                  // Stage A 冻结为 1
-  status: "EXECUTING" | "SUCCEEDED" | "FAILED";
+  attemptNo: int;                  // Stage B 起允许递增重试 attempt
+  trigger: "INITIAL_EXECUTION" | "FAST_RETRY" | "BACKOFF_RETRY" | "PROCESSING_TIMEOUT_GOVERNANCE";
+  executionStatus: "STARTED" | "SUCCEEDED" | "FAILED_CLASSIFIED" | "ABANDONED";
+  status: "EXECUTING" | "SUCCEEDED" | "FAILED" | "ABANDONED"; // 兼容 Stage A 旧列
   dispatcherRunId: string;
   executorRef: string;
   executionPath: "DEFAULT_PROVIDER";
@@ -153,7 +180,9 @@ interface FulfillmentAttempt {
   startedAt: DateTime?;
   finishedAt: DateTime?;
   deliveryResult: DeliveryResult?;
-  failure: FailureSummary?;
+  failure: FailureSummary?;         // Stage A 失败摘要兼容字段
+  failureDecision: FailureDecision?;
+  providerDiagnostic: ProviderDiagnostic?;
   diagnosticTrace: DiagnosticTrace;
 }
 
@@ -168,6 +197,42 @@ interface FailureSummary {
   reasonCode: "PROVIDER_REJECTED" | "PROVIDER_TIMEOUT" | "PROVIDER_TECHNICAL_FAILURE" | "DELIVERY_RESULT_INVALID";
   reasonMessage: string;           // concise stable summary, not raw stack trace
   failedAt: DateTime;
+}
+
+interface FailureDecision {
+  category:
+    | "RETRYABLE_TECHNICAL_FAILURE"
+    | "FINAL_BUSINESS_REJECTED"
+    | "MANUAL_REVIEW_REQUIRED"
+    | "UNCERTAIN_RESULT";
+  reasonCode:
+    | "NETWORK_TIMEOUT"
+    | "GATEWAY_TEMPORARY_ERROR"
+    | "PROVIDER_RATE_LIMITED"
+    | "PROVIDER_TEMPORARILY_UNAVAILABLE"
+    | "FULFILLMENT_WINDOW_EXPIRED"
+    | "ORDER_CONDITION_INVALID"
+    | "PROVIDER_PERMANENT_REJECTED"
+    | "UPSTREAM_DATA_REQUIRES_REVIEW"
+    | "MANUAL_SOURCE_SWITCH_REQUIRED"
+    | "EXTERNAL_RESULT_UNKNOWN"
+    | "PROCESSING_STUCK_SAFE_TO_RETRY"
+    | "PROCESSING_STUCK_UNSAFE_TO_RETRY";
+  retryDisposition:
+    | "ALLOW_FAST_RETRY"
+    | "ALLOW_BACKOFF_RETRY"
+    | "STOP_AND_MANUAL"
+    | "STOP_AND_FINAL_FAIL";
+  manualReviewRequired: boolean;
+  finalTerminationSuggested: boolean;
+  rationale: string;
+  classifiedAt: DateTime;
+}
+
+interface ProviderDiagnostic {
+  providerCode: string?;
+  providerMessage: string?;
+  rawOutcomeKnown: boolean;
 }
 
 interface DiagnosticTrace {
@@ -192,17 +257,53 @@ interface DiagnosticTrace {
 **规则:**
 - 在 Payment Confirmation 成功事务内创建初始 `Fulfillment.PENDING`，与 `Order.CONFIRMED` 位于同一本地事务。
 - `orderId` 唯一约束**物理兜底** "一单一履约"；**不为 providerEventId 加唯一约束**（它只承担 traceability，不替代动作级幂等）。
-- `Fulfillment (1) -> (N) FulfillmentAttempt` 为未来扩展预留，但 Stage A 只允许一个有效执行尝试，`attemptNo = 1`。
+- `Fulfillment (1) -> (N) FulfillmentAttempt` 已在 Stage B 落地为多次治理尝试模型，但任一时刻只允许一个活跃 attempt 被 `currentAttemptId` 持有。
 - `status = PROCESSING` 时，必须存在且仅存在一个 `currentAttemptId` 指向 `status = EXECUTING` 的 attempt。
+- `status = RETRY_PENDING` 时，不存在活跃 attempt；下一步只能由治理侧显式调度 `FAST_RETRY` / `BACKOFF_RETRY` 重新进入 `PROCESSING`。
+- `status = MANUAL_PENDING` 表示自动恢复已停止，等待人工接管；不是终态，但自动调度不得再自行推进。
 - `status = SUCCEEDED` 时，`deliveryResult` 与 `terminalAt` 必填，`lastFailure` 必须为空。
-- `status = FAILED` 时，`lastFailure` 与 `terminalAt` 必填，`deliveryResult` 必须为空。
-- `status in {SUCCEEDED, FAILED}` 时，终态不可逆；不得再迁回 `PENDING` 或 `PROCESSING`。
+- `status = FAILED` 表示人工治理后的最终失败终局；`terminalAt` 必填，`deliveryResult` 必须为空。
+- `status in {SUCCEEDED, FAILED}` 时，终态不可逆；不得再迁回 `PENDING`、`RETRY_PENDING` 或 `PROCESSING`。
 - 只有与 `currentAttemptId` 匹配的 attempt 才有资格提交成功或失败终局。
-- `PROCESSING -> PROCESSING` 仅允许记录保守滞留诊断；不得释放执行权、不得伪造成功/失败终局、不得回退到 `PENDING`。
+- `PROCESSING` 超时治理若判定可安全重试，必须先把当前 attempt 收口为 `ABANDONED`，再进入 `RETRY_PENDING`；若证据不足，则进入 `MANUAL_PENDING`。
 - `executionPath` 在 Stage A 固定为 `DEFAULT_PROVIDER`，不得引入 provider route、fallback path 或多实现编排。
 - `lastDiagnosticTrace` 为治理必填字段；空值视为 invariant broken。
 
-### 2.6 `AuditTrailEvent`
+### 2.6 `GovernanceAuditRecord`
+
+```typescript
+interface GovernanceAuditRecord {
+  auditId: string;                 // PK
+  fulfillmentId: string;
+  attemptId: string?;
+  actionType:
+    | "ATTEMPT_STARTED"
+    | "ATTEMPT_ABANDONED"
+    | "ATTEMPT_CLASSIFIED"
+    | "FAST_RETRY_SCHEDULED"
+    | "BACKOFF_RETRY_SCHEDULED"
+    | "MOVED_TO_RETRY_PENDING"
+    | "MOVED_TO_MANUAL_PENDING"
+    | "MOVED_TO_FAILED"
+    | "MOVED_TO_SUCCEEDED"
+    | "PROCESSING_TIMEOUT_GOVERNED";
+  fromStatus: Fulfillment["status"]?;
+  toStatus: Fulfillment["status"]?;
+  failureCategory: FailureDecision["category"]?;
+  reasonCode: FailureDecision["reasonCode"]?;
+  retryBudgetSnapshot: RetryState?;
+  actorType: "SYSTEM";
+  occurredAt: DateTime;
+  createdAt: DateTime;
+}
+```
+
+**规则:**
+- `FulfillmentGovernanceAuditRecord` 是履约治理专用 append-only 证据表，补充通用 `AuditTrailEvent` 无法表达的治理细粒度上下文。
+- 预算快照记录的是动作发生后的 `RetryState` 结果，用于人工排障与运营追责。
+- Stage B actor 冻结为 `SYSTEM`；人工工作台接入需后续 feature 明确定义。
+
+### 2.7 `AuditTrailEvent`
 
 ```typescript
 interface AuditTrailEvent {
@@ -253,7 +354,7 @@ type ReasonCode =
 - `occurredAt` 与 `createdAt` 分离，应对 callback 重放、事务重试的时序分析。
 - 不对 `providerEventId` / `requestId` / `idempotencyKey` 加唯一约束（traceability 用途，不替代幂等裁决）。
 
-### 2.7 `IdempotencyRecord`（基础设施）
+### 2.8 `IdempotencyRecord`（基础设施）
 
 ```typescript
 interface IdempotencyRecord {
@@ -291,18 +392,19 @@ Reservation (N) ─────────(1) InventoryResource     [lock / rel
      ▼
 TicketOrder (1) ─── (0..1) Fulfillment             [一单一履约]
                               │
-                              │ owns
-                              ▼
-                      FulfillmentAttempt (0..N)
+                              ├── owns ──► FulfillmentAttempt (0..N)
+                              │
+                              └── emits ─► GovernanceAuditRecord (0..N)
      │
-     ▼                        ▼
+     ▼
   AuditTrailEvent (append-only, 引用所有聚合的 id)
 ```
 
 **关键约束:**
 - `Reservation -> TicketOrder`：严格 1:1；不允许正常主链路绕过 Reservation 直接创建 Order。
 - `TicketOrder -> Fulfillment`：严格 1:1；由 `fulfillment_record.order_id` 唯一约束兜底。
-- `Fulfillment -> FulfillmentAttempt`：Stage A 逻辑上允许 `0..N`，但冻结为最多 1 个有效 attempt；后续多次尝试需新 feat 明确扩展。
+- `Fulfillment -> FulfillmentAttempt`：Stage B 已允许历史 attempts 递增累积，但同一时刻最多 1 个活跃 attempt。
+- `Fulfillment -> GovernanceAuditRecord`：严格 append-only；治理动作成功提交时必须同事务落一条或多条对应审计。
 - `AuditTrailEvent`：旁路关联，不参与事务一致性裁决，但 timeout close 路径中的 append 必须与主状态迁移同事务。
 
 ---
@@ -353,6 +455,21 @@ Stage A 的 Fulfillment Processing 由以下本地事务组成：
 2. 不承诺外部 provider 调用与本地终局提交的分布式原子性；若结果已发生但本地无法安全定终局，必须走 T5 保守滞留。
 3. 不接受主状态成功但摘要或审计缺失；任一子步骤失败整笔回滚。
 
+### 4.5 Fulfillment Governance Convergence（feat-TKT002-02）
+
+Stage B 在 `Fulfillment` 聚合内新增治理事务：
+
+1. T8 `ClassifyAttemptFailure`：`PROCESSING` 中的活跃 attempt 被分类，attempt 写入 `failureDecision` / `providerDiagnostic` 并收口为 `FAILED_CLASSIFIED`，aggregate 收敛到 `RETRY_PENDING` / `MANUAL_PENDING` / `FAILED`。
+2. T9 `ScheduleRetryAfterFailure`：仅在 `RETRY_PENDING` 下消耗预算并安排 `FAST_RETRY` 或 `BACKOFF_RETRY`；预算耗尽时成功收敛到 `MANUAL_PENDING`，不再对外暴露失败。
+3. T10 `StartRetryAttempt`：从 `RETRY_PENDING` 创建新 attempt，并重新进入 `PROCESSING`，同时设置新的 processing lease。
+4. T11 `GovernProcessingTimeout`：对超时的 `PROCESSING` 对象执行治理，把活跃 attempt 改写为 `ABANDONED`，再根据证据进入 `RETRY_PENDING` 或 `MANUAL_PENDING`。
+5. T12 `RecordAttemptSuccess`：当前活跃 attempt 成功收口，aggregate 进入 `SUCCEEDED`。
+
+统一约束：
+1. `T8-T12` 全部以 `fulfillment.version` CAS 为唯一串行化裁决，不引入跨聚合分布式事务。
+2. 治理状态迁移、attempt 收口、`retry_state_json` 改写与 `fulfillment_governance_audit_record` append 必须同事务提交。
+3. `RETRY_PENDING` / `MANUAL_PENDING` 下 `currentAttemptId` 与 processing lease 必须为空，避免“无活跃执行却仍持有 lease”的脏态。
+
 ---
 
 ## 5. Provenance（追溯）
@@ -361,7 +478,8 @@ Stage A 的 Fulfillment Processing 由以下本地事务组成：
 |---|---|---|
 | `CatalogItem` / `InventoryResource` / `Reservation` / `TicketOrder` / `IdempotencyRecord` | feat-TKT001-01 | — |
 | `TicketOrder.confirmedAt` / `TicketOrder.version` | feat-TKT001-02 | ALTER TABLE |
-| `Fulfillment` | feat-TKT001-02 | feat-TKT002-01 扩展到 `PROCESSING / SUCCEEDED / FAILED` 并引入 execution metadata |
-| `FulfillmentAttempt` / `DeliveryResult` / `FailureSummary` / `DiagnosticTrace` | feat-TKT002-01 | — |
+| `Fulfillment` | feat-TKT001-02 | feat-TKT002-01 扩展到 `PROCESSING / SUCCEEDED / FAILED`；feat-TKT002-02 再扩展到 `RETRY_PENDING / MANUAL_PENDING` 并引入治理元数据 |
+| `FulfillmentAttempt` / `DeliveryResult` / `FailureSummary` / `DiagnosticTrace` | feat-TKT002-01 | feat-TKT002-02 增加 `trigger` / `executionStatus` / `FailureDecision` / `ProviderDiagnostic` |
+| `RetryPolicySnapshot` / `RetryState` / `ProcessingLease` / `GovernanceAuditRecord` | feat-TKT002-02 | — |
 | `TicketOrder.closedAt` / `Reservation.releasedAt` | feat-TKT001-03 | ALTER TABLE |
 | `AuditTrailEvent` | feat-TKT001-03 | — |
