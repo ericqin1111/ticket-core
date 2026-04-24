@@ -58,7 +58,8 @@ application-dev.yml
 ############################
 # 10. AI Agent / 自动化产物（关键）
 ############################
-.agents/
+# .agents/ 是项目规范与工作流文档，必须提交
+# ❗不要忽略 .agents/，除非需清理历史临时文件
 .codex/
 .claude/
 .cursor/
