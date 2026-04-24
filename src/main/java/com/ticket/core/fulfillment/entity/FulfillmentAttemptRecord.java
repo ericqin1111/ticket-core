@@ -15,6 +15,8 @@ public class FulfillmentAttemptRecord {
     private String attemptId;
     private String fulfillmentId;
     private Integer attemptNo;
+    private String trigger;
+    private String executionStatus;
     private String status;
     private String dispatcherRunId;
     private String executorRef;
@@ -24,6 +26,8 @@ public class FulfillmentAttemptRecord {
     private LocalDateTime finishedAt;
     private String deliveryResultJson;
     private String failureJson;
+    private String failureDecisionJson;
+    private String providerDiagnosticJson;
     private String diagnosticTraceJson;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
