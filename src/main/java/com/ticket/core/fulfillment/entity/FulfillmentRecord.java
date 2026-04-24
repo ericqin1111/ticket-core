@@ -22,6 +22,13 @@ public class FulfillmentRecord {
     private String providerPaymentId;
     private LocalDateTime confirmedAt;
     private String channelContextJson;
+    private String currentAttemptId;
+    private LocalDateTime processingStartedAt;
+    private LocalDateTime terminalAt;
+    private String executionPath;
+    private String deliveryResultJson;
+    private String lastFailureJson;
+    private String lastDiagnosticTraceJson;
     @Version
     private Long version;
     private LocalDateTime createdAt;

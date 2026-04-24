@@ -61,6 +61,7 @@ application-dev.yml
 # .agents/ 是项目规范与工作流文档，必须提交
 # ❗不要忽略 .agents/，除非需清理历史临时文件
 .codex/
+.skills/
 .claude/
 .cursor/
 .cache/
