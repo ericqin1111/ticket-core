@@ -1,0 +1,39 @@
+{
+  "feat_id": "feat-TKT002-02-retry-failure-convergence",
+  "path": "A(Greenfield)",
+  "provider": "codex",
+  "workspace": "/home/fdoeric/dev/ticket-core/docs/03_features_workspace/feat-TKT002-02-retry-failure-convergence",
+  "code_root": "/home/fdoeric/dev/ticket-core",
+  "global_arch_dir": "/home/fdoeric/dev/ticket-core/docs/01_living_architecture",
+  "status": "blocked",
+  "current_stage": "worker_gate3_rejected",
+  "last_success_stage": "architect_completed",
+  "resume_from": "worker",
+  "retry_counters": {
+    "architect_gate2": 3,
+    "worker_gate3": 4
+  },
+  "runtime_retry_counters": {
+    "architect": 0,
+    "worker": 0,
+    "librarian": 0
+  },
+  "session_ids": {
+    "architect": "",
+    "worker": "",
+    "librarian": null
+  },
+  "artifacts": {
+    "pm_spec": "1_pm_spec.md",
+    "blueprint": "2_blueprint.md",
+    "adr": "adr.md",
+    "pr_summary": "3_pr_summary.md",
+    "execution_log": "4_execution.jsonl"
+  },
+  "last_verdict": {
+    "stage": "worker_gate3_rejected",
+    "file": "/home/fdoeric/dev/ticket-core/docs/03_features_workspace/feat-TKT002-02-retry-failure-convergence/reviewer_gate3.json"
+  },
+  "last_error": null,
+  "updated_at": "2026-04-24T07:53:27Z"
+}
